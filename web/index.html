@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinkPilot</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262a33; --text:#e8eaef; --muted:#8b92a3; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; letter-spacing:.2px; }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin:0 0 12px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .stat b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:12px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; }
+  label { display:grid; gap:4px; color:var(--muted); font-size:12px; }
+  input, textarea, select { background:#0f1218; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+  textarea { width:100%; min-height:110px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  button.danger { background:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+  .alert { padding:10px 12px; border-radius:8px; background:#3a1d1d; border:1px solid #5b2626; color:#fecaca; }
+  .muted { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  td a { color:#93c5fd; text-decoration:none; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:999px; background:#232834; white-space:nowrap; }
+  .tag.sent { background:#123222; color:#86efac; } .tag.queued { background:#1c2638; color:#93c5fd; }
+  .tag.failed, .tag.email_required { background:#3a1d1d; color:#fca5a5; } .tag.in_progress { background:#3a2e12; color:#fcd34d; }
+  .days { display:flex; gap:6px; flex-wrap:wrap; }
+  .days label { display:flex; align-items:center; gap:4px; color:var(--text); }
+  #login { max-width:380px; margin:80px auto; text-align:center; }
+  .hidden { display:none !important; }
+  .tablewrap { overflow-x:auto; }
+  .two { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+  .chip { font-size:12px; padding:3px 10px; border-radius:999px; background:#1d2433; color:#b9d1ff; }
+  .note { background:#121826; border:1px solid #2c3a57; border-radius:8px; padding:12px; white-space:pre-wrap; }
+  .check { display:flex; align-items:center; gap:8px; color:var(--text); font-size:13px; }
+  .tag.accepted { background:#2a1f3f; color:#d8b4fe; } .tag.messaged { background:#123222; color:#86efac; }
+  .tag.dm_failed { background:#3a1d1d; color:#fca5a5; } .tag.ai_skipped, .tag.dm_skipped { background:#232834; color:#9aa1b1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LinkPilot</h1>
+  <div class="row"><span id="who" class="muted"></span><button id="signout" class="ghost hidden">Sign out</button></div>
+</header>
+
+<div id="login" class="card">
+  <h2>Sign in</h2>
+  <p class="muted">Use an allowed Google account.</p>
+  <button id="signin">Sign in with Google</button>
+  <p id="loginErr" class="muted"></p>
+</div>
+
+<main id="app" class="hidden">
+  <div id="alert" class="alert hidden"></div>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Status</h2>
+      <div class="row">
+        <span id="extPill" class="pill"><span class="dot"></span><span>Extension</span></span>
+        <span id="runPill" class="pill"><span class="dot"></span><span>Paused</span></span>
+        <button id="toggle">Start</button>
+      </div>
+    </div>
+    <div class="stats" style="margin-top:14px">
+      <div class="stat"><b id="sToday">0</b><span>Sent today</span></div>
+      <div class="stat"><b id="sWeek">0</b><span>Sent last 7 days</span></div>
+      <div class="stat"><b id="sQueued">0</b><span>In queue</span></div>
+      <div class="stat"><b id="sAccepted">0</b><span>Accepted, DM pending</span></div>
+      <div class="stat"><b id="sDms">0</b><span>DMs today</span></div>
+      <div class="stat"><b id="sNext">-</b><span>Next send / waiting on</span></div>
+    </div>
+    <p id="lastResult" class="muted" style="margin:12px 0 0"></p>
+  </section>
+
+  <section class="card">
+    <h2>Campaign: who should it find?</h2>
+    <label>Describe the people in plain English. The AI turns this into LinkedIn searches and picks who fits.
+      <textarea id="campaignPrompt" data-k="campaignPrompt" placeholder="Find owners and founders of hair transplant and hair implant clinics in Dubai, London, Istanbul and Toronto. Skip hospital chains and recruiters."></textarea></label>
+    <div class="row" style="margin-top:10px">
+      <label class="check"><input type="checkbox" id="searchEnabled" data-k="searchEnabled"> Find people automatically</label>
+      <label>Searches per day<input id="searchesPerDay" data-k="searchesPerDay" type="number" min="0" max="15" style="width:90px"></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="save">Save campaign</button>
+      <button id="planBtn" class="ghost">Preview searches</button>
+      <span id="planMsg" class="muted"></span>
+    </div>
+    <div id="plan" class="row" style="margin-top:10px"></div>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>Message after they accept</h2>
+      <p class="muted" style="margin-top:0">Requests go out with no note. When someone accepts, the AI writes one message from their profile and sends it once. Anyone with existing chat history is skipped.</p>
+      <label>About you (the AI uses this)<input id="senderBlurb" data-k="senderBlurb"></label>
+      <label style="margin-top:8px">Message rules<textarea id="messageRules" data-k="messageRules"></textarea></label>
+      <div class="row" style="margin-top:8px">
+        <label>Tone<select id="tone" data-k="tone"><option value="peer">Peer</option><option value="curious">Curious</option><option value="short">Short</option></select></label>
+        <label>DMs per day<input id="dmDailyLimit" data-k="dmDailyLimit" type="number" min="0" max="30" style="width:90px"></label>
+        <label class="check" style="align-self:end"><input type="checkbox" id="dmEnabled" data-k="dmEnabled"> Send follow-up DMs</label>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="save">Save</button><button id="previewBtn" class="ghost">Preview a message</button><span id="previewMsg" class="muted"></span></div>
+      <div id="preview" class="note hidden" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>AI account</h2>
+      <p id="aiStatus" class="muted" style="margin-top:0">Checking...</p>
+
+      <div id="gptOff">
+        <p class="muted" style="font-size:12px;margin-top:0">Uses your ChatGPT plan. No API key, no extra bill.</p>
+        <button id="gptStart">Sign in with ChatGPT</button>
+        <div id="gptStep2" class="hidden" style="margin-top:12px">
+          <p class="muted" style="font-size:12px;margin:0 0 6px">After you approve, the new tab shows <b>"127.0.0.1 refused to connect"</b>. That's expected. Copy that tab's full address and paste it here:</p>
+          <input id="gptCallback" placeholder="http://127.0.0.1:1455/auth/callback?code=..." style="width:100%">
+          <div class="row" style="margin-top:8px"><button id="gptFinish">Finish sign-in</button></div>
+        </div>
+      </div>
+
+      <div id="gptOn" class="hidden">
+        <label>Model<select id="gptModel"></select></label>
+        <div class="row" style="margin-top:10px"><button id="gptDisconnect" class="ghost">Disconnect ChatGPT</button></div>
+      </div>
+      <p id="gptMsg" class="muted"></p>
+
+      <details style="margin-top:6px">
+        <summary class="muted" style="cursor:pointer;font-size:12px">Use an OpenAI API key instead</summary>
+        <div style="margin-top:8px">
+          <label>API key<input id="aiKey" type="password" autocomplete="off" placeholder="sk-..."></label>
+          <label style="margin-top:8px">Model for the API key<input id="aiModel" data-k="aiModel" placeholder="gpt-4o-mini"></label>
+          <div class="row" style="margin-top:10px"><button id="saveKey" class="ghost">Save key</button><button id="clearKey" class="ghost">Remove key</button><button class="save ghost">Save model</button><span id="keyMsg" class="muted"></span></div>
+        </div>
+      </details>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Add leads manually</h2>
+    <p class="muted" style="margin-top:0">One LinkedIn profile URL per line. You can add a name after a comma. CSV files work too.</p>
+    <textarea id="leadText" placeholder="https://www.linkedin.com/in/jane-doe/, Jane Doe&#10;https://www.linkedin.com/in/john-smith/"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button id="addLeads">Add to queue</button>
+      <input type="file" id="csv" accept=".csv,.txt">
+      <span id="addMsg" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <div class="grid2">
+      <label>Invites per day<input id="dailyLimit" data-k="dailyLimit" type="number" min="0" max="100"></label>
+      <label>Invites per 7 days<input id="weeklyLimit" data-k="weeklyLimit" type="number" min="0" max="200"></label>
+      <label>Min gap (minutes)<input id="minGapMin" data-k="minGapMin" type="number" min="1"></label>
+      <label>Max gap (minutes)<input id="maxGapMin" data-k="maxGapMin" type="number" min="1"></label>
+      <label>Start time<input id="activeStart" data-k="activeStart" type="time"></label>
+      <label>End time<input id="activeEnd" data-k="activeEnd" type="time"></label>
+      <label>Timezone<input id="timezone" data-k="timezone" placeholder="Asia/Dhaka"></label>
+    </div>
+    <div style="margin-top:10px">
+      <span class="muted" style="font-size:12px">Active days</span>
+      <div class="days" id="days"></div>
+    </div>
+    <div class="row" style="margin-top:12px"><button class="save">Save settings</button><span id="setMsg" class="muted"></span></div>
+    <p class="muted" style="font-size:12px;margin-bottom:0">Free LinkedIn caps invites at about 100 a week. 15 a day with a 30-34 min gap fills the 8-hour window evenly.</p>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Leads</h2>
+      <div class="row">
+        <select id="filter">
+          <option value="">All</option><option value="queued">Queued</option><option value="sent">Sent</option>
+          <option value="in_progress">In progress</option><option value="already_pending">Already pending</option>
+          <option value="already_connected">Already connected</option><option value="no_connect_button">No connect button</option>
+          <option value="email_required">Email required</option><option value="failed">Failed</option>
+          <option value="accepted">Accepted (DM pending)</option><option value="messaged">Messaged</option>
+          <option value="dm_skipped">DM skipped</option><option value="dm_failed">DM failed</option><option value="ai_skipped">Skipped by AI</option>
+        </select>
+        <button id="refresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Name / profile</th><th>Status</th><th>Added</th><th>Sent</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p id="count" class="muted"></p>
+  </section>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

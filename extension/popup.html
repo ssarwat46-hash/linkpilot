@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262a33; --text:#e8eaef; --muted:#9aa1b1; --accent:#4f8cff; --ok:#34d399; --warn:#f59e0b; --bad:#ef4444; }
+  * { box-sizing: border-box; }
+  body { width: 360px; margin: 0; font: 13px/1.45 Inter, system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+  .logo { width: 24px; height: 24px; border-radius: 6px; background: var(--accent); display: grid; place-items: center; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .icon { background: transparent; border: 1px solid var(--line); color: var(--text); border-radius: 8px; width: 32px; height: 32px; display: grid; place-items: center; cursor: pointer; padding: 0; }
+  .icon:hover { border-color: #3a4050; }
+  main { padding: 12px 14px 14px; display: grid; gap: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+  .stat b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat b small { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .stat span { color: var(--muted); font-size: 11px; }
+  .bar { height: 4px; border-radius: 4px; background: #232834; margin-top: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; }
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; }
+  .label { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .now { display: flex; gap: 8px; align-items: flex-start; }
+  .spin { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--accent); flex: none; }
+  .spin.live { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .alert { border-radius: 10px; padding: 9px 11px; font-size: 12px; }
+  .alert.bad { background: #3a1d1d; border: 1px solid #5b2626; color: #fecaca; }
+  .alert.warn { background: #2b2210; border: 1px solid #4a3a16; color: #fde68a; }
+  .row { display: flex; gap: 8px; }
+  button.btn { flex: 1; min-height: 36px; border-radius: 8px; border: 0; font: inherit; font-weight: 600; cursor: pointer; background: var(--accent); color: #0b1020; }
+  button.btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 500; }
+  button.btn.stop { background: #2a2f3a; color: var(--text); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+  input { background: #0f1218; color: var(--text); border: 1px solid #2f3440; border-radius: 8px; padding: 8px 9px; font: inherit; }
+  .muted { color: var(--muted); font-size: 11px; }
+  .hidden { display: none !important; }
+  h2 { font-size: 13px; margin: 0; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#0f1115" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></div>
+      LinkPilot
+    </div>
+    <div class="row" style="align-items:center">
+      <span id="statePill" class="pill"><span class="dot"></span><span>Checking…</span></span>
+      <button id="gear" class="icon" aria-label="Setup" title="Setup">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="home">
+    <div id="alerts" style="display:grid;gap:8px"></div>
+
+    <div class="grid">
+      <div class="stat"><b id="sReq">–</b><span>Requests today</span><div class="bar"><i id="barReq"></i></div></div>
+      <div class="stat"><b id="sDm">–</b><span>Messages today</span><div class="bar"><i id="barDm"></i></div></div>
+      <div class="stat"><b id="sQueue">–</b><span>People in queue</span></div>
+      <div class="stat"><b id="sAcc">–</b><span>Accepted, message next</span></div>
+    </div>
+
+    <div class="box">
+      <div class="label">Right now</div>
+      <div class="now"><span id="nowDot" class="spin"></span><span id="nowText">–</span></div>
+      <div id="nowWhen" class="muted" style="margin-top:2px"></div>
+    </div>
+
+    <div class="box">
+      <div class="label">Next request</div>
+      <div id="nextText">–</div>
+      <div id="weekText" class="muted" style="margin-top:2px"></div>
+    </div>
+
+    <div class="row">
+      <button id="toggle" class="btn" disabled>Start</button>
+      <button id="run" class="btn ghost">Run now</button>
+      <button id="open" class="btn ghost">Dashboard</button>
+    </div>
+    <p class="muted" style="margin:0">Keep Chrome open and stay logged in to LinkedIn. It works in background tabs inside your active hours.</p>
+  </main>
+
+  <main id="setup" class="hidden">
+    <h2>Setup</h2>
+    <label>Dashboard URL<input id="apiUrl" placeholder="https://your-project.web.app"></label>
+    <label>Extension token<input id="token" type="password" placeholder="paste the token"></label>
+    <div class="row">
+      <button id="save" class="btn">Save &amp; test</button>
+      <button id="back" class="btn ghost">Back</button>
+    </div>
+    <div id="msg" class="box muted">Paste the dashboard link and the token you were given.</div>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

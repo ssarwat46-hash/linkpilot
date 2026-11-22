@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "LinkPilot",
+  "version": "2.0.0",
+  "description": "Finds people from your LinkPilot campaign, sends connection requests inside your limits, and one follow-up message after they accept.",
+  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "https://*.web.app/*",
+    "https://*.firebaseapp.com/*",
+    "https://*.run.app/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "LinkPilot" }
+}
