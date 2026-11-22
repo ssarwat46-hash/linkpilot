@@ -3,40 +3,44 @@ import express from 'express';
 import cors from 'cors';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
-import { getAuth } from 'firebase-admin/auth';
 import {
   DEFAULT_SETTINGS, cleanSettings, inActiveWindow, lastNDateKeys, zonedParts,
   normalizeProfileUrl, randomGapMs, FINAL_OUTCOMES,
   searchUrl, nextCursor, hashText, isFirstDegree, cleanDm, planMessages, filterMessages, dmMessages,
 } from './lib.js';
 import * as gpt from './chatgpt.js';
+import {
+  parseUsers, checkLogin, passwordVersion, signSession, verifySession, newDeviceToken, hashToken, rateLimiter,
+} from './auth.js';
 
 initializeApp();
 const db = getFirestore();
-const auth = getAuth();
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-const EXT_TOKEN = process.env.EXT_TOKEN || '';
-if (!ADMIN_EMAILS.length) console.warn('ADMIN_EMAILS is empty: nobody can use the dashboard');
-if (EXT_TOKEN.length < 24) console.warn('EXT_TOKEN missing or too short: extension calls will be rejected');
+const USERS = parseUsers(process.env.LINKPILOT_USERS);
+const SESSION_SECRET = process.env.SESSION_SECRET || '';
+if (!USERS.size) console.warn('LINKPILOT_USERS is empty: nobody can sign in');
+if (SESSION_SECRET.length < 32) console.warn('SESSION_SECRET missing or short: sign-in is disabled');
 
 const leads = db.collection('leads');
+const devices = db.collection('devices'); // one per browser/extension install, each with its own limits
 const settingsRef = db.doc('meta/settings');
-const stateRef = db.doc('meta/state');
+const stateRef = db.doc('meta/state'); // shared: search plan/cursor, AI pause
 const aiKeyRef = db.doc('private/openai'); // Firestore rules deny all client access; only this API reads it
 const chatgptRef = db.doc('private/chatgpt'); // Sign in with ChatGPT tokens
 const loginRef = db.doc('private/chatgpt_login'); // pending PKCE login
-const dailyRef = (key) => db.doc(`daily/${key}`);
+const dailyRef = (deviceId, key) => db.doc(`daily/${deviceId}_${key}`);
 
 const STALE_MS = 15 * 60000;
 const LOCK_MS = 10 * 60000;
 const ACCEPT_CHECK_EVERY = 3 * 3600000;
 const CONNECTIONS_URL = 'https://www.linkedin.com/mynetwork/invite-connect/connections/';
+const LOGGED_OUT = 'LinkedIn is logged out in this browser. Log back in. Retrying in 30 min.';
 const actionGap = () => Math.round((4 + Math.random() * 4) * 60000); // 4-8 min between non-invite actions
 const inc = (n) => FieldValue.increment(n);
 
 const app = express();
-app.use(cors({ origin: (o, cb) => cb(null, !o || o.startsWith('chrome-extension://')), allowedHeaders: ['Content-Type', 'Authorization', 'X-Ext-Token'] }));
+
+app.use(cors({ origin: (o, cb) => cb(null, !o || o.startsWith('chrome-extension://')), allowedHeaders: ['Content-Type', 'Authorization', 'X-Device-Token'] }));
 app.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use(express.json({ limit: '2mb' }));
 
@@ -51,25 +55,42 @@ for (const m of ['get', 'post', 'put', 'delete']) {
 const validId = (id) => typeof id === 'string' && id.length > 0 && id.length < 700 && !id.includes('/') && id !== '.' && id !== '..';
 
 // ---------- auth ----------
-async function adminAuth(req, res, next) {
-  try {
-    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!token) return res.status(401).json({ error: 'not signed in' });
-    const user = await auth.verifyIdToken(token);
-    if (!user.email || user.email_verified === false || !ADMIN_EMAILS.includes(user.email.toLowerCase())) {
-      return res.status(403).json({ error: `${user.email || 'this account'} is not allowed` });
-    }
-    req.user = user;
-    next();
-  } catch {
-    res.status(401).json({ error: 'bad or expired sign-in' });
-  }
+// Per-IP limit plus a global one: X-Forwarded-For can be spoofed, the global cap can't.
+const limiter = rateLimiter({ max: 10, windowMs: 15 * 60000 });
+const globalLimiter = rateLimiter({ max: 40, windowMs: 15 * 60000 });
+const clientIp = (req) => String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+
+function login(req, res) {
+  const ip = clientIp(req);
+  if (limiter.blocked(ip) || globalLimiter.blocked('all')) { res.status(429).json({ error: 'Too many wrong tries. Wait 15 minutes.' }); return null; }
+  if (SESSION_SECRET.length < 32) { res.status(503).json({ error: 'Sign-in is not configured on the server' }); return null; }
+  const user = checkLogin(USERS, req.body?.username, req.body?.password);
+  if (!user) { limiter.fail(ip); globalLimiter.fail('all'); res.status(401).json({ error: 'Wrong username or password' }); return null; }
+  limiter.reset(ip);
+  return user;
 }
 
-function extAuth(req, res, next) {
-  const t = Buffer.from(String(req.headers['x-ext-token'] || ''));
-  const k = Buffer.from(EXT_TOKEN);
-  if (k.length < 24 || t.length !== k.length || !crypto.timingSafeEqual(t, k)) return res.status(401).json({ error: 'bad extension token' });
+function adminAuth(req, res, next) {
+  const p = verifySession((req.headers.authorization || '').replace(/^Bearer\s+/i, ''), SESSION_SECRET);
+  const stored = p && USERS.get(p.u);
+  if (!p || !stored || p.v !== passwordVersion(stored)) return res.status(401).json({ error: 'not signed in' });
+  req.user = { username: p.u };
+  next();
+}
+
+const tokenCache = new Map(); // tokenHash -> { id, at }
+async function extAuth(req, res, next) {
+  const t = String(req.headers['x-device-token'] || '');
+  if (t.length < 20) return res.status(401).json({ error: 'This browser is not signed in. Open the extension and log in.' });
+  const h = hashToken(t);
+  let id = tokenCache.get(h)?.at > Date.now() - 300000 ? tokenCache.get(h).id : null;
+  if (!id) {
+    const q = await devices.where('tokenHash', '==', h).limit(1).get();
+    if (q.empty) return res.status(401).json({ error: 'This browser was removed or signed out. Log in again in the extension.' });
+    id = q.docs[0].id;
+    tokenCache.set(h, { id, at: Date.now() });
+  }
+  req.device = { id, ref: devices.doc(id) };
   next();
 }
 
@@ -147,22 +168,22 @@ async function ai(s, messages) {
   try { return JSON.parse(data.choices?.[0]?.message?.content || '{}'); } catch { throw new Error('OpenAI returned bad JSON'); }
 }
 
-async function counts(s, now, tx) {
+// Per-browser counters: daily/<deviceId>_<YYYY-MM-DD> { sent, dms, searches }
+async function counts(s, now, deviceId, tx) {
   const keys = lastNDateKeys(now, s.timezone, 7);
-  const refs = keys.map(dailyRef);
+  const refs = keys.map((k) => dailyRef(deviceId, k));
   const snaps = tx ? await tx.getAll(...refs) : await db.getAll(...refs);
   const today = zonedParts(new Date(now), s.timezone).dateKey;
   let week = 0, t = {};
-  for (const sn of snaps) {
+  snaps.forEach((sn, i) => {
     week += sn.data()?.sent || 0;
-    if (sn.id === today) t = sn.data() || {};
-  }
+    if (keys[i] === today) t = sn.data() || {};
+  });
   return { today: t.sent || 0, week, dmsToday: t.dms || 0, searchesToday: t.searches || 0, todayKey: today };
 }
 
-async function bumpDaily(s, field, now = Date.now()) {
-  const key = zonedParts(new Date(now), s.timezone).dateKey;
-  await dailyRef(key).set({ [field]: inc(1) }, { merge: true });
+async function bumpDaily(s, deviceId, field, now = Date.now()) {
+  await dailyRef(deviceId, zonedParts(new Date(now), s.timezone).dateKey).set({ [field]: inc(1) }, { merge: true });
 }
 
 async function releaseStale(now) {
@@ -172,15 +193,17 @@ async function releaseStale(now) {
   for (const d of snap.docs) {
     if ((d.data().claimedAt || 0) < now - STALE_MS) {
       // A DM retry is safe: the sender checks the chat history first and skips if anything is there.
-      batch.update(d.ref, { status: d.data().status === 'dm_in_progress' ? 'accepted' : 'queued', claimedAt: null });
+      batch.update(d.ref, d.data().status === 'dm_in_progress'
+        ? { status: 'accepted', claimedAt: null }
+        : { status: 'queued', claimedAt: null, deviceId: null });
       n++;
     }
   }
   if (n) await batch.commit();
 }
 
-async function finishAction(extra = {}) {
-  await stateRef.set({ lock: null, nextActionAt: Date.now() + actionGap(), ...extra }, { merge: true });
+async function finishAction(device, extra = {}) {
+  await device.ref.set({ lock: null, nextActionAt: Date.now() + actionGap(), ...extra }, { merge: true });
 }
 
 async function ensurePlan(s, st, force = false) {
@@ -204,106 +227,123 @@ async function writeDm(s, lead) {
   throw new Error('AI message failed the checks twice (too long, link or placeholder)');
 }
 
+const deviceName = (v) => String(v || '').replace(/[^\p{L}\p{N} ._'()-]/gu, '').trim().slice(0, 40) || 'Browser';
+
 // ---------- extension endpoints ----------
-app.post('/api/ext/ping', extAuth, async (req, res) => {
-  const now = Date.now();
-  await stateRef.set({ lastSeen: now, extVersion: req.body?.version || null }, { merge: true });
-  const s = await getSettings();
-  const queued = (await leads.where('status', '==', 'queued').count().get()).data().count;
-  res.json({ ok: true, paused: s.paused, queued, activeNow: inActiveWindow(now, s), aiReady: await aiReady() });
+// Log a browser in with the dashboard username/password. Returns a per-browser key; the password is not kept.
+app.post('/api/ext/register', async (req, res) => {
+  const user = login(req, res);
+  if (!user) return;
+  const token = newDeviceToken();
+  const ref = devices.doc();
+  await ref.set({ name: deviceName(req.body?.name), tokenHash: hashToken(token), createdAt: Date.now(), createdBy: user, lastSeen: Date.now() });
+  res.json({ deviceToken: token, deviceId: ref.id, name: deviceName(req.body?.name) });
 });
 
-// Read-only summary for the extension popup.
+app.post('/api/ext/ping', extAuth, async (req, res) => {
+  const now = Date.now();
+  await req.device.ref.set({ lastSeen: now, extVersion: req.body?.version || null }, { merge: true });
+  const s = await getSettings();
+  const queued = (await leads.where('status', '==', 'queued').count().get()).data().count;
+  const name = (await req.device.ref.get()).data()?.name || 'Browser';
+  res.json({ ok: true, name, paused: s.paused, queued, activeNow: inActiveWindow(now, s), aiReady: await aiReady() });
+});
+
+// Read-only summary for the extension popup (this browser's own numbers).
 app.post('/api/ext/status', extAuth, async (req, res) => {
   const now = Date.now();
   const s = await getSettings();
-  const cnt = (st) => leads.where('status', '==', st).count().get().then((x) => x.data().count);
-  const [c, st, queued, accepted, key] = await Promise.all([
-    counts(s, now), stateRef.get().then((x) => x.data() || {}), cnt('queued'), cnt('accepted'), aiReady(),
+  const mine = (st) => leads.where('deviceId', '==', req.device.id).where('status', '==', st).count().get().then((x) => x.data().count);
+  const [c, dv, queued, accepted, ready] = await Promise.all([
+    counts(s, now, req.device.id), req.device.ref.get().then((x) => x.data() || {}),
+    leads.where('status', '==', 'queued').count().get().then((x) => x.data().count), mine('accepted'), aiReady(),
   ]);
-  const lr = st.lastResult;
+  const lr = dv.lastResult;
   res.json({
-    paused: s.paused, activeNow: inActiveWindow(now, s), pausedUntil: (st.pausedUntil || 0) > now ? st.pausedUntil : null,
+    name: dv.name || 'Browser', paused: s.paused, activeNow: inActiveWindow(now, s), pausedUntil: (dv.pausedUntil || 0) > now ? dv.pausedUntil : null,
     window: `${s.activeStart}–${s.activeEnd}`, today: c.today, dailyLimit: s.dailyLimit, week: c.week, weeklyLimit: s.weeklyLimit,
-    dmsToday: c.dmsToday, dmDailyLimit: s.dmDailyLimit, queued, accepted, aiReady: !!key, hasCampaign: !!s.campaignPrompt.trim(),
-    nextInviteAt: (st.nextAllowedAt || 0) > now ? st.nextAllowedAt : null, lastWait: st.lastWait || null, lastError: st.lastError || null,
+    dmsToday: c.dmsToday, dmDailyLimit: s.dmDailyLimit, queued, accepted, aiReady: ready, hasCampaign: !!s.campaignPrompt.trim(),
+    nextInviteAt: (dv.nextAllowedAt || 0) > now ? dv.nextAllowedAt : null, lastWait: dv.lastWait || null, lastError: dv.lastError || null,
     lastResult: lr ? { name: lr.name || '', outcome: lr.outcome, at: lr.at } : null,
   });
 });
 
-// Start/Pause from the popup (same switch as the dashboard's Start/Pause).
+// Start/Pause from the popup (the shared switch, same as the dashboard).
 app.post('/api/ext/pause', extAuth, async (req, res) => {
   const paused = req.body?.paused === true;
   const s = cleanSettings({ ...(await getSettings()), paused });
   await settingsRef.set(s);
-  if (!paused) await stateRef.set({ pausedUntil: 0, lastError: null }, { merge: true });
+  if (!paused) await req.device.ref.set({ pausedUntil: 0, lastError: null }, { merge: true });
   res.json({ paused });
 });
 
-// Hands the extension its next job: connect > DM > accept check > search.
+// Hands this browser its next job: connect > DM > accept check > search.
 app.post('/api/ext/claim', extAuth, async (req, res) => {
   const now = Date.now();
-  await stateRef.set({ lastSeen: now, extVersion: req.body?.version || null }, { merge: true });
+  const dev = req.device;
+  await dev.ref.set({ lastSeen: now, extVersion: req.body?.version || null }, { merge: true });
   await releaseStale(now);
   const hasKey = await aiReady();
 
   const out = await db.runTransaction(async (tx) => {
-    const [sSnap, stSnap] = await tx.getAll(settingsRef, stateRef);
+    const [sSnap, stSnap, dSnap] = await tx.getAll(settingsRef, stateRef, dev.ref);
     const s = { ...DEFAULT_SETTINGS, ...(sSnap.data() || {}) };
     const st = stSnap.data() || {};
+    const dv = dSnap.data() || {};
     if (s.paused) return { wait: 'paused' };
-    if ((st.pausedUntil || 0) > now) return { wait: `auto-paused until ${new Date(st.pausedUntil).toISOString()}` };
+    if ((dv.pausedUntil || 0) > now) return { wait: `auto-paused until ${new Date(dv.pausedUntil).toISOString()}` };
     if (!inActiveWindow(now, s)) return { wait: 'outside active hours' };
-    if ((st.lock?.until || 0) > now) return { wait: `busy (${st.lock.type})` };
-    const busy = await tx.get(leads.where('status', 'in', ['in_progress', 'dm_in_progress']).limit(1));
+    if ((dv.lock?.until || 0) > now) return { wait: `busy (${dv.lock.type})` };
+    const busy = await tx.get(leads.where('deviceId', '==', dev.id).where('status', 'in', ['in_progress', 'dm_in_progress']).limit(1));
     if (!busy.empty) return { wait: 'another task is in progress' };
 
-    const c = await counts(s, now, tx);
+    const c = await counts(s, now, dev.id, tx);
     const reasons = [];
 
-    // 1. Connection request (keeps its own even spacing)
+    // 1. Connection request: this browser's own 15/day, 90/week and spacing
     if (c.today >= s.dailyLimit) reasons.push(`daily limit hit (${c.today}/${s.dailyLimit})`);
     else if (c.week >= s.weeklyLimit) reasons.push(`weekly limit hit (${c.week}/${s.weeklyLimit})`);
-    else if ((st.nextAllowedAt || 0) > now) reasons.push(`next invite after ${new Date(st.nextAllowedAt).toISOString()}`);
+    else if ((dv.nextAllowedAt || 0) > now) reasons.push(`next invite after ${new Date(dv.nextAllowedAt).toISOString()}`);
     else {
       const q = await tx.get(leads.where('status', '==', 'queued').orderBy('createdAt').limit(1));
       if (!q.empty) {
         const d = q.docs[0];
-        tx.update(d.ref, { status: 'in_progress', claimedAt: now, attempts: inc(1) });
+        tx.update(d.ref, { status: 'in_progress', claimedAt: now, attempts: inc(1), deviceId: dev.id });
         const lead = { id: d.id, url: d.data().url, name: d.data().name || '' };
         return { task: { type: 'connect', lead }, lead };
       }
       reasons.push('queue empty');
     }
 
-    const actionOk = (st.nextActionAt || 0) <= now;
+    const actionOk = (dv.nextActionAt || 0) <= now;
 
-    // 2. Follow-up DM to someone who accepted
+    // 2. Follow-up DM, only to people THIS browser invited (same LinkedIn account)
     if (actionOk && s.dmEnabled && hasKey && c.dmsToday < s.dmDailyLimit) {
-      const a = await tx.get(leads.where('status', '==', 'accepted').limit(1));
+      const a = await tx.get(leads.where('deviceId', '==', dev.id).where('status', '==', 'accepted').limit(1));
       if (!a.empty) {
         const d = a.docs[0];
         tx.update(d.ref, { status: 'dm_in_progress', claimedAt: now, dmAttempts: inc(1) });
-        tx.set(stateRef, { lock: { type: 'dm', until: now + LOCK_MS } }, { merge: true });
+        tx.set(dev.ref, { lock: { type: 'dm', until: now + LOCK_MS } }, { merge: true });
         return { dmLeadId: d.id };
       }
     }
 
-    // 3. Check who accepted (every 3 hours, only if someone is pending)
-    if (actionOk && s.dmEnabled && now - (st.lastAcceptCheckAt || 0) > ACCEPT_CHECK_EVERY) {
-      const sent = await tx.get(leads.where('status', '==', 'sent').limit(1));
+    // 3. Check who accepted this browser's invites (every 3 hours)
+    if (actionOk && s.dmEnabled && now - (dv.lastAcceptCheckAt || 0) > ACCEPT_CHECK_EVERY) {
+      const sent = await tx.get(leads.where('deviceId', '==', dev.id).where('status', '==', 'sent').limit(1));
       if (!sent.empty) {
-        tx.set(stateRef, { lock: { type: 'accept_check', until: now + LOCK_MS }, lastAcceptCheckAt: now }, { merge: true });
+        tx.set(dev.ref, { lock: { type: 'accept_check', until: now + LOCK_MS }, lastAcceptCheckAt: now }, { merge: true });
         return { task: { type: 'accept_check', url: CONNECTIONS_URL } };
       }
     }
 
-    // 4. Find more people from the campaign prompt
+    // 4. Find more people for the shared queue (one browser searches at a time)
     const exhausted = st.searchExhausted && st.searchPlan?.hash === hashText(s.campaignPrompt);
-    if (actionOk && s.searchEnabled && hasKey && s.campaignPrompt.trim() && !exhausted && c.searchesToday < s.searchesPerDay) {
+    if (actionOk && s.searchEnabled && hasKey && s.campaignPrompt.trim() && !exhausted && c.searchesToday < s.searchesPerDay && (st.searchLockUntil || 0) <= now) {
       const queued = (await tx.get(leads.where('status', '==', 'queued').limit(s.searchBuffer))).size;
       if (queued < s.searchBuffer) {
-        tx.set(stateRef, { lock: { type: 'search', until: now + LOCK_MS } }, { merge: true });
+        tx.set(dev.ref, { lock: { type: 'search', until: now + LOCK_MS } }, { merge: true });
+        tx.set(stateRef, { searchLockUntil: now + LOCK_MS }, { merge: true });
         return { needSearch: true };
       }
     }
@@ -322,7 +362,7 @@ app.post('/api/ext/claim', extAuth, async (req, res) => {
       } catch (e) {
         const failed = (lead.dmAttempts || 0) >= 3;
         await ref.update({ status: failed ? 'dm_failed' : 'accepted', claimedAt: null, detail: String(e.message).slice(0, 300) });
-        await finishAction({ lastError: `Could not write a message: ${e.message}` });
+        await finishAction(dev, { lastError: `Could not write a message: ${e.message}` });
         return res.json({ wait: 'AI message failed' });
       }
     }
@@ -332,21 +372,22 @@ app.post('/api/ext/claim', extAuth, async (req, res) => {
   if (out.needSearch) {
     try {
       const s = await getSettings();
-      const st = (await stateRef.get()).data() || {};
-      const plan = await ensurePlan(s, st);
+      const plan = await ensurePlan(s, (await stateRef.get()).data() || {});
       const cur = (await stateRef.get()).data()?.searchCursor || { q: 0, p: 1 };
       if (cur.q >= plan.queries.length) {
-        await finishAction({ searchExhausted: true });
+        await stateRef.set({ searchExhausted: true, searchLockUntil: 0 }, { merge: true });
+        await finishAction(dev);
         return res.json({ wait: 'search used up for this prompt' });
       }
       return res.json({ task: { type: 'search', url: searchUrl(plan.queries[cur.q], cur.p), key: `${plan.hash}:${cur.q}:${cur.p}` } });
     } catch (e) {
-      await finishAction({ lastError: `Search planning failed: ${e.message}` });
+      await stateRef.set({ searchLockUntil: 0, lastError: `Search planning failed: ${e.message}` }, { merge: true });
+      await finishAction(dev);
       return res.json({ wait: 'search planning failed' });
     }
   }
 
-  if (out.wait) await stateRef.set({ lastWait: out.wait }, { merge: true });
+  if (out.wait) await dev.ref.set({ lastWait: out.wait }, { merge: true });
   res.json(out.task ? { task: out.task, lead: out.lead } : { wait: out.wait });
 });
 
@@ -355,6 +396,7 @@ app.post('/api/ext/result', extAuth, async (req, res) => {
   const { id, outcome, detail, profile, finalUrl } = req.body || {};
   if (!validId(id) || !outcome || typeof outcome !== 'string') return res.status(400).json({ error: 'id and outcome required' });
   const now = Date.now();
+  const dev = req.device;
   const s = await getSettings();
   const ref = leads.doc(String(id));
   const todayKey = zonedParts(new Date(now), s.timezone).dateKey;
@@ -368,35 +410,35 @@ app.post('/api/ext/result', extAuth, async (req, res) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return;
     const lead = snap.data();
-    // Duplicate/late report for a lead that's already final: don't double count.
-    if (lead.status !== 'in_progress' && lead.status !== 'queued') return;
-    const log = { at: now, outcome, detail: note };
-    const st = { lastResult: { ...log, leadId: id, name: lead.name || '' } };
+    // Only the browser that claimed it may report, and only once.
+    if (lead.status !== 'in_progress' || lead.deviceId !== dev.id) return;
+    const log = { at: now, outcome, detail: note, deviceId: dev.id };
+    const dv = { lastResult: { ...log, leadId: id, name: lead.name || '' } };
 
     if (outcome === 'sent') {
       tx.update(ref, { ...extra, status: 'sent', sentAt: now, detail: note, claimedAt: null, history: FieldValue.arrayUnion(log) });
-      tx.set(dailyRef(todayKey), { sent: inc(1) }, { merge: true });
-      st.nextAllowedAt = now + randomGapMs(s);
-      st.lastError = null;
+      tx.set(dailyRef(dev.id, todayKey), { sent: inc(1) }, { merge: true });
+      dv.nextAllowedAt = now + randomGapMs(s);
+      dv.lastError = null;
     } else if (FINAL_OUTCOMES.has(outcome)) {
       tx.update(ref, { ...extra, status: outcome, detail: note, claimedAt: null, history: FieldValue.arrayUnion(log) });
-      st.nextAllowedAt = now + (1 + Math.random() * 2) * 60000; // still a profile visit, small gap
-      st.lastError = null;
+      dv.nextAllowedAt = now + (1 + Math.random() * 2) * 60000; // still a profile visit, small gap
+      dv.lastError = null;
     } else if (outcome === 'weekly_limit') {
-      tx.update(ref, { status: 'queued', claimedAt: null, detail: note, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
-      st.pausedUntil = now + 48 * 3600000;
-      st.lastError = 'LinkedIn weekly invite limit hit. Auto-paused for 48 hours.';
+      tx.update(ref, { status: 'queued', deviceId: null, claimedAt: null, detail: note, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
+      dv.pausedUntil = now + 48 * 3600000;
+      dv.lastError = 'LinkedIn weekly invite limit hit on this browser. Auto-paused for 48 hours.';
     } else if (outcome === 'logged_out') {
-      tx.update(ref, { status: 'queued', claimedAt: null, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
-      st.pausedUntil = now + 30 * 60000;
-      st.lastError = 'LinkedIn is logged out in Chrome. Log back in. Retrying in 30 min.';
+      tx.update(ref, { status: 'queued', deviceId: null, claimedAt: null, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
+      dv.pausedUntil = now + 30 * 60000;
+      dv.lastError = LOGGED_OUT;
     } else {
       const failed = (lead.attempts || 0) >= 3;
-      tx.update(ref, { status: failed ? 'failed' : 'queued', claimedAt: null, detail: note, history: FieldValue.arrayUnion(log) });
-      st.nextAllowedAt = now + (2 + Math.random() * 3) * 60000;
-      st.lastError = `Error on ${lead.name || id}: ${note || outcome}`;
+      tx.update(ref, { status: failed ? 'failed' : 'queued', deviceId: failed ? dev.id : null, claimedAt: null, detail: note, history: FieldValue.arrayUnion(log) });
+      dv.nextAllowedAt = now + (2 + Math.random() * 3) * 60000;
+      dv.lastError = `Error on ${lead.name || id}: ${note || outcome}`;
     }
-    tx.set(stateRef, st, { merge: true });
+    tx.set(dev.ref, dv, { merge: true });
   });
   res.json({ ok: true });
 });
@@ -406,19 +448,20 @@ app.post('/api/ext/dm-result', extAuth, async (req, res) => {
   const { id, outcome, detail } = req.body || {};
   if (!validId(id) || typeof outcome !== 'string') return res.status(400).json({ error: 'id and outcome required' });
   const now = Date.now();
+  const dev = req.device;
   const s = await getSettings();
   const ref = leads.doc(id);
   const note = detail ? String(detail).slice(0, 300) : null;
   const snap = await ref.get();
-  if (!snap.exists || snap.data().status !== 'dm_in_progress') { await finishAction(); return res.json({ ok: true }); }
+  if (!snap.exists || snap.data().status !== 'dm_in_progress' || snap.data().deviceId !== dev.id) { await finishAction(dev); return res.json({ ok: true }); }
   const lead = snap.data();
-  const log = { at: now, outcome: `dm_${outcome}`, detail: note };
-  const st = { lastResult: { ...log, leadId: id, name: lead.name || '' } };
+  const log = { at: now, outcome: `dm_${outcome}`, detail: note, deviceId: dev.id };
+  const dv = { lastResult: { ...log, leadId: id, name: lead.name || '' } };
 
   if (outcome === 'sent') {
     await ref.update({ status: 'messaged', dmSentAt: now, detail: null, claimedAt: null, history: FieldValue.arrayUnion(log) });
-    await bumpDaily(s, 'dms', now);
-    st.lastError = null;
+    await bumpDaily(s, dev.id, 'dms', now);
+    dv.lastError = null;
   } else if (outcome === 'already_messaged' || outcome === 'not_connected' || outcome === 'no_message_button') {
     await ref.update({ status: 'dm_skipped', detail: note || outcome.replace(/_/g, ' '), claimedAt: null, history: FieldValue.arrayUnion(log) });
   } else if (outcome === 'uncertain') {
@@ -426,28 +469,29 @@ app.post('/api/ext/dm-result', extAuth, async (req, res) => {
     await ref.update({ status: 'dm_failed', detail: note || 'not sure it sent, check the chat', claimedAt: null, history: FieldValue.arrayUnion(log) });
   } else if (outcome === 'logged_out') {
     await ref.update({ status: 'accepted', claimedAt: null, dmAttempts: inc(-1), history: FieldValue.arrayUnion(log) });
-    st.pausedUntil = now + 30 * 60000;
-    st.lastError = 'LinkedIn is logged out in Chrome. Log back in. Retrying in 30 min.';
+    dv.pausedUntil = now + 30 * 60000;
+    dv.lastError = LOGGED_OUT;
   } else {
     const failed = (lead.dmAttempts || 0) >= 3;
     await ref.update({ status: failed ? 'dm_failed' : 'accepted', detail: note, claimedAt: null, history: FieldValue.arrayUnion(log) });
-    st.lastError = `DM error on ${lead.name || id}: ${note || outcome}`;
+    dv.lastError = `DM error on ${lead.name || id}: ${note || outcome}`;
   }
-  await finishAction(st);
+  await finishAction(dev, dv);
   res.json({ ok: true });
 });
 
-// List of profile links from "recently added" connections.
+// List of profile links from this browser's "recently added" connections.
 app.post('/api/ext/accepted', extAuth, async (req, res) => {
   const { hrefs, error } = req.body || {};
+  const dev = req.device;
   if (error === 'logged_out') {
-    await finishAction({ pausedUntil: Date.now() + 30 * 60000, lastError: 'LinkedIn is logged out in Chrome. Log back in. Retrying in 30 min.', lastAcceptCheckAt: 0 });
+    await finishAction(dev, { pausedUntil: Date.now() + 30 * 60000, lastError: LOGGED_OUT, lastAcceptCheckAt: 0 });
     return res.json({ ok: true });
   }
   const slugs = new Set((Array.isArray(hrefs) ? hrefs : []).slice(0, 300).map((h) => normalizeProfileUrl(h)?.slug).filter(Boolean));
   let accepted = 0;
   if (slugs.size) {
-    const sent = await leads.where('status', '==', 'sent').get();
+    const sent = await leads.where('deviceId', '==', dev.id).where('status', '==', 'sent').get();
     const batch = db.batch();
     const now = Date.now();
     for (const d of sent.docs) {
@@ -459,21 +503,23 @@ app.post('/api/ext/accepted', extAuth, async (req, res) => {
     }
     if (accepted) await batch.commit();
   }
-  await finishAction({ lastAcceptCheck: { at: Date.now(), seen: slugs.size, accepted, error: error || null } });
+  await finishAction(dev, { lastAcceptCheck: { at: Date.now(), seen: slugs.size, accepted, error: error || null } });
   res.json({ ok: true, accepted });
 });
 
-// People-search page results.
+// People-search page results (feeds the shared queue).
 app.post('/api/ext/search-result', extAuth, async (req, res) => {
   const { key, results, error } = req.body || {};
+  const dev = req.device;
   const s = await getSettings();
   const st = (await stateRef.get()).data() || {};
   const plan = st.searchPlan;
   if (error === 'logged_out') {
-    await finishAction({ pausedUntil: Date.now() + 30 * 60000, lastError: 'LinkedIn is logged out in Chrome. Log back in. Retrying in 30 min.' });
+    await stateRef.set({ searchLockUntil: 0 }, { merge: true });
+    await finishAction(dev, { pausedUntil: Date.now() + 30 * 60000, lastError: LOGGED_OUT });
     return res.json({ ok: true });
   }
-  await bumpDaily(s, 'searches');
+  await bumpDaily(s, dev.id, 'searches');
   const [hash, qs, ps] = String(key || '').split(':');
   const cur = { q: Number(qs), p: Number(ps) };
   const stale = !plan || hash !== plan.hash;
@@ -500,7 +546,8 @@ app.post('/api/ext/search-result', extAuth, async (req, res) => {
       const out = await ai(s, filterMessages(s, fresh));
       matches = new Map((Array.isArray(out.matches) ? out.matches : []).filter((m) => Number.isInteger(m?.i) && fresh[m.i]).map((m) => [m.i, m]));
     } catch (e) {
-      await finishAction({ lastError: `AI screening failed: ${e.message}` }); // cursor not advanced: page retried later
+      await stateRef.set({ searchLockUntil: 0, lastError: `AI screening failed: ${e.message}` }, { merge: true }); // cursor not advanced: retried later
+      await finishAction(dev);
       return res.json({ ok: false });
     }
     const now = Date.now();
@@ -508,39 +555,80 @@ app.post('/api/ext/search-result', extAuth, async (req, res) => {
     fresh.forEach((c, i) => {
       const m = matches.get(i);
       batch.set(leads.doc(c.id), {
-        url: c.url, name: String(m?.name || '').slice(0, 120), headline: c.text, source: 'search',
+        url: c.url, name: String(m?.name || '').slice(0, 120), headline: c.text, source: 'search', foundBy: dev.id,
         status: m ? 'queued' : 'ai_skipped', matchReason: m ? String(m.reason || '').slice(0, 200) : null,
-        createdAt: now + i, attempts: 0,
+        createdAt: now + i, attempts: 0, deviceId: null,
       });
       if (m) added++; else skipped++;
     });
     await batch.commit();
   }
 
-  const extra = { lastSearch: { at: Date.now(), found: raw.length, added, skipped, error: error || null } };
+  const shared = { searchLockUntil: 0, lastSearch: { at: Date.now(), found: raw.length, added, skipped, error: error || null, deviceId: dev.id } };
   if (!stale && Number.isInteger(cur.q)) {
     const next = nextCursor(cur, plan.queries.length, raw.length === 0);
-    extra.searchCursor = next || { q: plan.queries.length, p: 1 };
-    if (!next) extra.searchExhausted = true;
+    shared.searchCursor = next || { q: plan.queries.length, p: 1 };
+    if (!next) shared.searchExhausted = true;
   }
-  await finishAction(extra);
+  await stateRef.set(shared, { merge: true });
+  await finishAction(dev);
   res.json({ ok: true, added, skipped });
 });
 
 // ---------- dashboard endpoints ----------
-app.get('/api/me', adminAuth, (req, res) => res.json({ email: req.user.email }));
+app.post('/api/login', (req, res) => {
+  const user = login(req, res);
+  if (!user) return;
+  res.json({ token: signSession({ user, version: passwordVersion(USERS.get(user)) }, SESSION_SECRET), user });
+});
+
+app.get('/api/me', adminAuth, (req, res) => res.json({ user: req.user.username }));
+
+async function deviceSummaries(s, now) {
+  const snap = await devices.get();
+  return Promise.all(snap.docs.map(async (d) => {
+    const x = d.data();
+    const c = await counts(s, now, d.id);
+    return {
+      id: d.id, name: x.name || 'Browser', lastSeen: x.lastSeen || null, extVersion: x.extVersion || null,
+      today: c.today, week: c.week, dmsToday: c.dmsToday, searchesToday: c.searchesToday,
+      pausedUntil: (x.pausedUntil || 0) > now ? x.pausedUntil : null, nextAllowedAt: (x.nextAllowedAt || 0) > now ? x.nextAllowedAt : null,
+      lastWait: x.lastWait || null, lastError: x.lastError || null, lastResult: x.lastResult || null, createdAt: x.createdAt || null,
+    };
+  }));
+}
 
 app.get('/api/stats', adminAuth, async (req, res) => {
   const now = Date.now();
   const s = await getSettings();
   const cnt = (st) => leads.where('status', '==', st).count().get().then((x) => x.data().count);
-  const [c, st, queued, accepted, messaged, key] = await Promise.all([
-    counts(s, now), stateRef.get().then((x) => x.data() || {}), cnt('queued'), cnt('accepted'), cnt('messaged'), aiReady(),
+  const [devs, st, queued, accepted, messaged, ready] = await Promise.all([
+    deviceSummaries(s, now), stateRef.get().then((x) => x.data() || {}), cnt('queued'), cnt('accepted'), cnt('messaged'), aiReady(),
   ]);
+  const sum = (k) => devs.reduce((a, d) => a + (d[k] || 0), 0);
   res.json({
-    now, today: c.today, week: c.week, dmsToday: c.dmsToday, searchesToday: c.searchesToday,
-    queued, accepted, messaged, aiReady: !!key, settings: s, state: st, activeNow: inActiveWindow(now, s),
+    now, today: sum('today'), week: sum('week'), dmsToday: sum('dmsToday'), searchesToday: sum('searchesToday'),
+    queued, accepted, messaged, aiReady: ready, settings: s, state: st, devices: devs, activeNow: inActiveWindow(now, s),
   });
+});
+
+app.put('/api/devices/:id', adminAuth, async (req, res) => {
+  if (!validId(req.params.id)) return res.status(400).json({ error: 'bad id' });
+  const ref = devices.doc(req.params.id);
+  if (!(await ref.get()).exists) return res.status(404).json({ error: 'not found' });
+  const patch = {};
+  if (typeof req.body?.name === 'string') patch.name = deviceName(req.body.name);
+  if (req.body?.clearPause) Object.assign(patch, { pausedUntil: 0, lastError: null });
+  await ref.set(patch, { merge: true });
+  res.json({ ok: true });
+});
+
+// Signs that browser out (its key stops working). Its history and counts stay.
+app.delete('/api/devices/:id', adminAuth, async (req, res) => {
+  if (!validId(req.params.id)) return res.status(400).json({ error: 'bad id' });
+  await devices.doc(req.params.id).delete();
+  tokenCache.clear();
+  res.json({ ok: true });
 });
 
 app.get('/api/settings', adminAuth, async (req, res) => res.json(await getSettings()));
@@ -549,7 +637,13 @@ app.put('/api/settings', adminAuth, async (req, res) => {
   const current = await getSettings();
   const s = cleanSettings({ ...current, ...(req.body || {}) });
   await settingsRef.set(s);
-  if (req.body?.clearAutoPause) await stateRef.set({ pausedUntil: 0, lastError: null }, { merge: true });
+  if (req.body?.clearAutoPause) {
+    const snap = await devices.get();
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.set(d.ref, { pausedUntil: 0, lastError: null }, { merge: true }));
+    batch.set(stateRef, { lastError: null }, { merge: true });
+    await batch.commit();
+  }
   res.json(s);
 });
 
@@ -568,8 +662,8 @@ app.post('/api/ai/chatgpt/start', adminAuth, async (req, res) => {
   if (!c.hostId) await chatgptRef.set({ hostId }, { merge: true });
   const { verifier, challenge } = gpt.newPkce();
   const state = gpt.randomToken(24), nonce = gpt.randomToken(24);
-  await loginRef.set({ verifier, state, nonce, at: Date.now(), by: req.user.email });
-  res.json({ url: gpt.authorizeUrl({ clientId: c.clientId || null, hostId, challenge, state, nonce, email: req.user.email }) });
+  await loginRef.set({ verifier, state, nonce, at: Date.now(), by: req.user.username });
+  res.json({ url: gpt.authorizeUrl({ clientId: c.clientId || null, hostId, challenge, state, nonce, email: c.email || null }) });
 });
 
 // Step 2: finish with the pasted 127.0.0.1 address.
@@ -605,7 +699,7 @@ app.post('/api/ai/chatgpt/finish', adminAuth, async (req, res) => {
   await chatgptRef.set({
     clientId, accessToken: t.access_token, refreshToken: t.refresh_token,
     accessExpiresAt: Date.now() + (Number(t.expires_in) || 3600) * 1000,
-    email: claims.email || null, models: models.slice(0, 50), model, needsSignIn: false, connectedAt: Date.now(), connectedBy: req.user.email,
+    email: claims.email || null, models: models.slice(0, 50), model, needsSignIn: false, connectedAt: Date.now(), connectedBy: req.user.username,
   }, { merge: true });
   await stateRef.set({ aiPausedUntil: 0, lastError: null }, { merge: true });
   res.json({ connected: true, email: claims.email || null, model, models });
@@ -634,7 +728,7 @@ app.put('/api/ai', adminAuth, async (req, res) => {
   if (!/^sk-[\w-]{20,}$/.test(key)) return res.status(400).json({ error: 'That does not look like an OpenAI API key (starts with sk-)' });
   const r = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(20000) });
   if (!r.ok) return res.status(400).json({ error: `OpenAI rejected the key (HTTP ${r.status})` });
-  await aiKeyRef.set({ key, setBy: req.user.email, at: Date.now() });
+  await aiKeyRef.set({ key, setBy: req.user.username, at: Date.now() });
   res.json({ connected: true, last4: key.slice(-4) });
 });
 
@@ -679,6 +773,7 @@ app.get('/api/leads', adminAuth, async (req, res) => {
       id: d.id, url: x.url, name: x.name || '', status: x.status, createdAt: x.createdAt, sentAt: x.sentAt || null,
       detail: x.detail || null, attempts: x.attempts || 0, source: x.source || 'manual', matchReason: x.matchReason || null,
       headline: x.headline ? x.headline.slice(0, 160) : null, acceptedAt: x.acceptedAt || null, dmSentAt: x.dmSentAt || null, dmText: x.dmText || null,
+      deviceId: x.deviceId || null,
     };
   }));
 });
@@ -702,7 +797,7 @@ app.post('/api/leads', adminAuth, async (req, res) => {
     snaps.forEach((sn, j) => {
       if (sn.exists) { skipped++; return; }
       const x = chunk[j];
-      batch.set(sn.ref, { url: x.url, name: x.name, status: 'queued', source: 'manual', createdAt: now + i + j, attempts: 0 });
+      batch.set(sn.ref, { url: x.url, name: x.name, status: 'queued', source: 'manual', createdAt: now + i + j, attempts: 0, deviceId: null });
       added++;
     });
     await batch.commit();
@@ -715,9 +810,9 @@ app.post('/api/leads/:id/requeue', adminAuth, async (req, res) => {
   const ref = leads.doc(req.params.id);
   const x = (await ref.get()).data();
   if (!x) return res.status(404).json({ error: 'not found' });
-  // DM retries are safe: the sender skips anyone with existing chat history.
+  // DM retries are safe (the sender skips anyone with chat history) and stay on the browser that invited them.
   const dm = ['dm_failed', 'dm_skipped'].includes(x.status);
-  await ref.update(dm ? { status: 'accepted', claimedAt: null, dmAttempts: 0 } : { status: 'queued', claimedAt: null, attempts: 0 });
+  await ref.update(dm ? { status: 'accepted', claimedAt: null, dmAttempts: 0 } : { status: 'queued', claimedAt: null, attempts: 0, deviceId: null });
   res.json({ ok: true });
 });
 

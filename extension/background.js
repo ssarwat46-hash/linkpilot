@@ -1,4 +1,5 @@
 import { connectOnProfile, scrapeSearch, scrapeConnections, sendDm } from './linkedin.js';
+import { DASHBOARD_URL } from './config.js';
 
 const ALARM = 'linkpilot-tick';
 const VERSION = chrome.runtime.getManifest().version;
@@ -16,26 +17,50 @@ chrome.alarms.onAlarm.addListener((a) => { if (a.name === ALARM) tick(); });
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === 'runNow') { tick(true).then(() => reply({ ok: true })); return true; }
   if (msg?.type === 'test') { testConnection().then(reply); return true; }
+  if (msg?.type === 'login') { login(msg).then(reply); return true; }
+  if (msg?.type === 'logout') { chrome.storage.local.remove(['deviceToken', 'deviceName', 'status']).then(() => reply({ ok: true })); return true; }
+  if (msg?.type === 'defaults') { cfg().then((c) => reply({ apiUrl: c.apiUrl, signedIn: !!c.token })); return true; }
   if (msg?.type === 'status') { api('/api/ext/status', {}).then((d) => reply({ ok: true, data: d }), (e) => reply({ ok: false, error: e.message })); return true; }
   if (msg?.type === 'pause') { api('/api/ext/pause', { paused: !!msg.paused }).then((d) => reply({ ok: true, data: d }), (e) => reply({ ok: false, error: e.message })); return true; }
 });
 
 async function cfg() {
-  const { apiUrl = '', token = '' } = await chrome.storage.local.get(['apiUrl', 'token']);
-  return { apiUrl: apiUrl.replace(/\/+$/, ''), token };
+  const { apiUrl = '', deviceToken = '' } = await chrome.storage.local.get(['apiUrl', 'deviceToken']);
+  return { apiUrl: (apiUrl || DASHBOARD_URL || '').replace(/\/+$/, ''), token: deviceToken };
 }
 
 async function api(path, body) {
   const { apiUrl, token } = await cfg();
-  if (!apiUrl || !token) throw new Error('Set the dashboard URL and token in the popup first.');
+  if (!apiUrl || !token) throw new Error('Not logged in. Open the extension and log in.');
   const res = await fetch(`${apiUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Ext-Token': token },
+    headers: { 'Content-Type': 'application/json', 'X-Device-Token': token },
     body: JSON.stringify(body || {}),
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) await chrome.storage.local.remove('deviceToken'); // removed in the dashboard: log in again
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+// Log this browser in with the dashboard username/password. Only the per-browser key is stored, never the password.
+async function login({ username, password, name, apiUrl }) {
+  const base = String(apiUrl || DASHBOARD_URL || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\//.test(base)) return { ok: false, text: 'Dashboard address is missing.' };
+  try {
+    const res = await fetch(`${base}/api/ext/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, name, version: VERSION }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, text: data.error || `HTTP ${res.status}` };
+    await chrome.storage.local.set({ apiUrl: base, deviceToken: data.deviceToken, deviceName: data.name });
+    await chrome.storage.local.remove('token'); // old shared token from v2.0
+    return testConnection();
+  } catch (e) {
+    return { ok: false, text: `Could not reach the dashboard: ${e.message}` };
+  }
 }
 
 // Results must reach the server, or counts and the never-twice rule drift. Retry once.
@@ -51,7 +76,7 @@ async function testConnection() {
   try {
     const r = await api('/api/ext/ping', { version: VERSION });
     const state = r.paused ? 'Paused in dashboard.' : r.activeNow ? 'Running.' : 'Outside active hours.';
-    return { ok: true, text: `Connected. ${r.queued} in queue. ${state}${r.aiReady ? '' : ' (AI not connected yet)'}` };
+    return { ok: true, text: `Logged in as "${r.name}". ${r.queued} in queue. ${state}${r.aiReady ? "" : " (AI not connected yet)"}` };
   } catch (e) {
     return { ok: false, text: e.message };
   }
@@ -63,7 +88,7 @@ async function tick() {
   await chrome.storage.local.set({ busyUntil: Date.now() + 5 * 60000 });
   try {
     const { apiUrl, token } = await cfg();
-    if (!apiUrl || !token) { await setStatus('Not set up yet'); return; }
+    if (!apiUrl || !token) { await setStatus('Not logged in'); return; }
 
     const r = await api('/api/ext/claim', { version: VERSION });
     const task = r.task || (r.lead ? { type: 'connect', lead: r.lead } : null);

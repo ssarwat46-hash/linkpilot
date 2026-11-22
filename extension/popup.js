@@ -72,16 +72,20 @@ function render(d) {
 
 async function refresh() {
   const r = await send({ type: 'status' });
-  if (r?.ok) render(r.data);
-  else { pill('bad', 'Not connected'); $('toggle').disabled = true; $('nowText').textContent = r?.error || 'No response'; }
+  if (r?.ok) { render(r.data); return; }
+  const d = await send({ type: 'defaults' });
+  if (!d?.signedIn) { pill('', 'Logged out'); $('logout').classList.add('hidden'); show('setup'); return; }
+  pill('bad', 'Not connected'); $('toggle').disabled = true; $('nowText').textContent = r?.error || 'No response';
 }
 
 async function load() {
-  const { apiUrl = '', token = '', status } = await chrome.storage.local.get(['apiUrl', 'token', 'status']);
-  $('apiUrl').value = apiUrl;
-  $('token').value = token;
+  const { status, deviceName = '' } = await chrome.storage.local.get(['status', 'deviceName']);
+  const d = await send({ type: 'defaults' });
+  $('apiUrl').value = d?.apiUrl || '';
+  $('devName').value = deviceName;
   showLocal(status);
-  if (!apiUrl || !token) { pill('', 'Not set up'); show('setup'); return; }
+  $('logout').classList.toggle('hidden', !d?.signedIn);
+  if (!d?.signedIn) { pill('', 'Logged out'); show('setup'); return; }
   show('home');
   await refresh();
 }
@@ -93,12 +97,25 @@ chrome.storage.onChanged.addListener((c) => {
 $('gear').onclick = () => show($('setup').classList.contains('hidden') ? 'setup' : 'home');
 $('back').onclick = () => show('home');
 
-$('save').onclick = async () => {
-  await chrome.storage.local.set({ apiUrl: $('apiUrl').value.trim().replace(/\/+$/, ''), token: $('token').value.trim() });
-  $('msg').textContent = 'Testing…';
-  const r = await send({ type: 'test' });
+$('loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  $('save').disabled = true;
+  $('msg').textContent = 'Logging in…';
+  const r = await send({
+    type: 'login', username: $('username').value.trim(), password: $('password').value,
+    name: $('devName').value.trim() || 'Browser', apiUrl: $('apiUrl').value.trim(),
+  });
+  $('password').value = '';
+  $('save').disabled = false;
   $('msg').textContent = r?.text || 'No response';
-  if (r?.ok) { show('home'); refresh(); }
+  if (r?.ok) { $('logout').classList.remove('hidden'); show('home'); refresh(); }
+};
+
+$('logout').onclick = async () => {
+  await send({ type: 'logout' });
+  $('logout').classList.add('hidden');
+  $('msg').textContent = 'Logged out. This browser stops sending until someone logs in again.';
+  pill('', 'Logged out');
 };
 
 $('toggle').onclick = async () => {
@@ -118,7 +135,7 @@ $('run').onclick = async () => {
 };
 
 $('open').onclick = async () => {
-  const { apiUrl } = await chrome.storage.local.get('apiUrl');
+  const { apiUrl } = await send({ type: 'defaults' });
   if (apiUrl) chrome.tabs.create({ url: apiUrl });
 };
 

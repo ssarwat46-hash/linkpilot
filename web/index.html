@@ -56,12 +56,13 @@
   <div class="row"><span id="who" class="muted"></span><button id="signout" class="ghost hidden">Sign out</button></div>
 </header>
 
-<div id="login" class="card">
+<form id="login" class="card" autocomplete="on">
   <h2>Sign in</h2>
-  <p class="muted">Use an allowed Google account.</p>
-  <button id="signin">Sign in with Google</button>
+  <label>Username<input id="username" name="username" autocomplete="username" required></label>
+  <label style="margin-top:10px">Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+  <button id="signin" type="submit" style="margin-top:14px;width:100%">Sign in</button>
   <p id="loginErr" class="muted"></p>
-</div>
+</form>
 
 <main id="app" class="hidden">
   <div id="alert" class="alert hidden"></div>
@@ -76,7 +77,7 @@
       </div>
     </div>
     <div class="stats" style="margin-top:14px">
-      <div class="stat"><b id="sToday">0</b><span>Sent today</span></div>
+      <div class="stat"><b id="sToday">0</b><span>Sent today (all browsers)</span></div>
       <div class="stat"><b id="sWeek">0</b><span>Sent last 7 days</span></div>
       <div class="stat"><b id="sQueued">0</b><span>In queue</span></div>
       <div class="stat"><b id="sAccepted">0</b><span>Accepted, DM pending</span></div>
@@ -84,6 +85,18 @@
       <div class="stat"><b id="sNext">-</b><span>Next send / waiting on</span></div>
     </div>
     <p id="lastResult" class="muted" style="margin:12px 0 0"></p>
+  </section>
+
+  <section class="card">
+    <h2>Browsers</h2>
+    <p class="muted" style="margin-top:0">Each browser with the extension has its own limits (requests per day and week, gaps, pauses). Use one LinkedIn account per browser.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Browser</th><th>Requests today</th><th>This week</th><th>DMs today</th><th>Status</th><th></th></tr></thead>
+        <tbody id="devRows"></tbody>
+      </table>
+    </div>
+    <p id="devEmpty" class="muted hidden">No browsers yet. Install the extension and log in with your dashboard username and password.</p>
   </section>
 
   <section class="card">
@@ -162,8 +175,8 @@
   <section class="card">
     <h2>Settings</h2>
     <div class="grid2">
-      <label>Invites per day<input id="dailyLimit" data-k="dailyLimit" type="number" min="0" max="100"></label>
-      <label>Invites per 7 days<input id="weeklyLimit" data-k="weeklyLimit" type="number" min="0" max="200"></label>
+      <label>Invites per day, per browser<input id="dailyLimit" data-k="dailyLimit" type="number" min="0" max="100"></label>
+      <label>Invites per 7 days, per browser<input id="weeklyLimit" data-k="weeklyLimit" type="number" min="0" max="200"></label>
       <label>Min gap (minutes)<input id="minGapMin" data-k="minGapMin" type="number" min="1"></label>
       <label>Max gap (minutes)<input id="maxGapMin" data-k="maxGapMin" type="number" min="1"></label>
       <label>Start time<input id="activeStart" data-k="activeStart" type="time"></label>
@@ -175,7 +188,7 @@
       <div class="days" id="days"></div>
     </div>
     <div class="row" style="margin-top:12px"><button class="save">Save settings</button><span id="setMsg" class="muted"></span></div>
-    <p class="muted" style="font-size:12px;margin-bottom:0">Free LinkedIn caps invites at about 100 a week. 15 a day with a 30-34 min gap fills the 8-hour window evenly.</p>
+    <p class="muted" style="font-size:12px;margin-bottom:0">Free LinkedIn caps invites at about 100 a week. Limits apply to each browser separately: 15 a day with a 30-34 min gap fills the 8-hour window evenly.</p>
   </section>
 
   <section class="card">
@@ -195,7 +208,7 @@
     </div>
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Name / profile</th><th>Status</th><th>Added</th><th>Sent</th><th></th></tr></thead>
+        <thead><tr><th>Name / profile</th><th>Status</th><th>Added</th><th>Sent</th><th>Browser</th><th></th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>

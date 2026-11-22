@@ -4,3 +4,4 @@ node_modules/
 *.log
 .env*
 web/config.js
+extension/config.js

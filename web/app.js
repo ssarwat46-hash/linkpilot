@@ -1,9 +1,8 @@
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { firebaseConfig } from './config.js';
-
-const auth = getAuth(initializeApp(firebaseConfig));
 const $ = (id) => document.getElementById(id);
+const SESSION_KEY = 'linkpilot_session';
+const getSession = () => { try { return localStorage.getItem(SESSION_KEY) || ''; } catch { return ''; } };
+const setSession = (t) => { try { t ? localStorage.setItem(SESSION_KEY, t) : localStorage.removeItem(SESSION_KEY); } catch { /* private mode */ } };
+let devices = [];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const NUMERIC = new Set(['dailyLimit', 'weeklyLimit', 'minGapMin', 'maxGapMin', 'dmDailyLimit', 'searchesPerDay']);
@@ -12,13 +11,13 @@ let allLeads = [];
 const dirty = new Set(); // fields edited but not saved yet: the 30s refresh must not overwrite them
 
 async function api(path, opts = {}) {
-  const token = await auth.currentUser.getIdToken();
   const res = await fetch(path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(opts.headers || {}) },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getSession()}`, ...(opts.headers || {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== '/api/login') { showLogin('Signed out. Sign in again.'); throw new Error('Signed out'); }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -51,24 +50,25 @@ async function loadStats() {
   $('sDms').textContent = `${s.dmsToday}/${settings.dmDailyLimit}`;
 
   const st = s.state || {};
-  const online = st.lastSeen && Date.now() - st.lastSeen < 10 * 60000;
-  setPill($('extPill'), online ? 'ok' : 'bad', `Extension ${online ? 'online' : 'offline'} (${ago(st.lastSeen)})`);
+  devices = s.devices || [];
+  const online = devices.filter((d) => d.lastSeen && Date.now() - d.lastSeen < 10 * 60000).length;
+  setPill($('extPill'), online ? 'ok' : 'bad', `${online}/${devices.length} browser${devices.length === 1 ? '' : 's'} online`);
 
-  const autoPaused = (st.pausedUntil || 0) > Date.now();
   if (settings.paused) setPill($('runPill'), '', 'Paused');
-  else if (autoPaused) setPill($('runPill'), 'warn', `Auto-paused until ${fmt(st.pausedUntil)}`);
   else if (!s.activeNow) setPill($('runPill'), 'warn', 'Running (outside hours)');
   else setPill($('runPill'), 'ok', 'Running');
   $('toggle').textContent = settings.paused ? 'Start' : 'Pause';
 
-  const next = st.nextAllowedAt && st.nextAllowedAt > Date.now() ? fmt(st.nextAllowedAt) : (st.lastWait || '-');
+  const nexts = devices.map((d) => d.nextAllowedAt).filter(Boolean).sort();
+  const next = nexts.length ? fmt(nexts[0]) : (devices.find((d) => d.lastWait)?.lastWait || '-');
   $('sNext').textContent = next;
   $('sNext').style.fontSize = next.length > 12 ? '14px' : '';
+  renderDevices(settings);
 
-  const lr = st.lastResult;
+  const lr = devices.map((d) => d.lastResult && { ...d.lastResult, browser: d.name }).filter(Boolean).sort((a, b) => b.at - a.at)[0];
   const ls = st.lastSearch;
   $('lastResult').textContent = [
-    lr ? `Last: ${lr.name || lr.leadId} → ${lr.outcome}${lr.detail ? ` (${lr.detail})` : ''}, ${ago(lr.at)}` : '',
+    lr ? `Last (${lr.browser}): ${lr.name || lr.leadId} → ${lr.outcome}${lr.detail ? ` (${lr.detail})` : ''}, ${ago(lr.at)}` : '',
     ls ? `Last search: ${ls.found} seen, ${ls.added} added, ${ls.skipped} skipped by AI, ${ago(ls.at)}` : '',
   ].filter(Boolean).join(' · ');
 
@@ -79,6 +79,43 @@ async function loadStats() {
   renderPlan(st.searchPlan);
   fillSettings();
 }
+
+function renderDevices(s) {
+  $('devEmpty').classList.toggle('hidden', devices.length > 0);
+  $('devRows').innerHTML = devices.map((d) => {
+    const on = d.lastSeen && Date.now() - d.lastSeen < 10 * 60000;
+    const status = d.pausedUntil ? `<span class="tag failed">paused till ${fmt(d.pausedUntil)}</span>`
+      : `<span class="tag ${on ? 'sent' : ''}">${on ? 'online' : 'offline'}</span> <span class="muted" style="font-size:12px">${ago(d.lastSeen)}</span>`;
+    return `<tr>
+      <td><div>${esc(d.name)}</div>${d.lastError ? `<div class="muted" style="font-size:12px;color:#fca5a5">${esc(d.lastError)}</div>` : d.lastWait ? `<div class="muted" style="font-size:12px">${esc(d.lastWait)}</div>` : ''}</td>
+      <td>${d.today}/${s.dailyLimit}</td><td>${d.week}/${s.weeklyLimit}</td><td>${d.dmsToday}/${s.dmDailyLimit}</td>
+      <td>${status}</td>
+      <td class="row" style="justify-content:flex-end">
+        ${d.pausedUntil || d.lastError ? `<button class="ghost" data-dev="clear" data-id="${esc(d.id)}">Clear pause</button>` : ''}
+        <button class="ghost" data-dev="rename" data-id="${esc(d.id)}">Rename</button>
+        <button class="ghost" data-dev="remove" data-id="${esc(d.id)}">Sign out</button>
+      </td></tr>`;
+  }).join('');
+}
+
+$('devRows').onclick = async (e) => {
+  const b = e.target.closest('button[data-dev]');
+  if (!b) return;
+  const d = devices.find((x) => x.id === b.dataset.id);
+  try {
+    if (b.dataset.dev === 'rename') {
+      const name = prompt('Name for this browser', d?.name || '');
+      if (name == null) return;
+      await api(`/api/devices/${encodeURIComponent(b.dataset.id)}`, { method: 'PUT', body: { name } });
+    } else if (b.dataset.dev === 'clear') {
+      await api(`/api/devices/${encodeURIComponent(b.dataset.id)}`, { method: 'PUT', body: { clearPause: true } });
+    } else if (b.dataset.dev === 'remove') {
+      if (!confirm(`Sign out "${d?.name}"? That browser stops working until someone logs in on it again.`)) return;
+      await api(`/api/devices/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' });
+    }
+    await loadStats();
+  } catch (err) { alert(err.message); }
+};
 
 function fillSettings() {
   for (const el of document.querySelectorAll('[data-k]')) {
@@ -109,6 +146,7 @@ function renderLeads() {
       <td><span class="tag ${esc(l.status)}">${esc(l.status.replace(/_/g, ' '))}</span>${l.source === 'search' ? '<div class="muted" style="font-size:11px;margin-top:4px">found by AI</div>' : ''}</td>
       <td class="muted">${fmt(l.createdAt)}</td>
       <td class="muted">${fmt(l.sentAt)}${l.dmSentAt ? `<div>DM ${fmt(l.dmSentAt)}</div>` : ''}</td>
+      <td class="muted">${esc(devices.find((d) => d.id === l.deviceId)?.name || (l.deviceId ? 'removed browser' : '-'))}</td>
       <td class="row" style="justify-content:flex-end">
         ${['failed', 'no_connect_button', 'email_required', 'ai_skipped', 'dm_failed', 'dm_skipped'].includes(l.status) ? `<button class="ghost" data-act="requeue" data-id="${esc(l.id)}">Retry</button>` : ''}
         <button class="ghost" data-act="delete" data-id="${esc(l.id)}">Delete</button>
@@ -159,8 +197,20 @@ async function saveSettings(extra = {}) {
 }
 
 // ---------- wiring ----------
-$('signin').onclick = () => signInWithPopup(auth, new GoogleAuthProvider()).catch((e) => ($('loginErr').textContent = e.message));
-$('signout').onclick = () => signOut(auth);
+$('login').onsubmit = async (e) => {
+  e.preventDefault();
+  $('signin').disabled = true;
+  $('loginErr').textContent = 'Signing in...';
+  try {
+    const r = await api('/api/login', { method: 'POST', body: { username: $('username').value, password: $('password').value } });
+    setSession(r.token);
+    $('password').value = '';
+    $('loginErr').textContent = '';
+    await start();
+  } catch (err) { $('loginErr').textContent = err.message; }
+  $('signin').disabled = false;
+};
+$('signout').onclick = () => { setSession(''); showLogin(''); };
 $('addLeads').onclick = () => addLeads($('leadText').value);
 $('csv').onchange = async (e) => { const f = e.target.files[0]; if (f) await addLeads(await f.text()); e.target.value = ''; };
 $('filter').onchange = renderLeads;
@@ -259,19 +309,27 @@ $('rows').onclick = async (e) => {
 };
 
 let timer = null;
-onAuthStateChanged(auth, async (user) => {
+function showLogin(msg) {
   clearInterval(timer);
-  $('who').textContent = user?.email || '';
-  $('signout').classList.toggle('hidden', !user);
-  if (!user) { $('login').classList.remove('hidden'); $('app').classList.add('hidden'); return; }
-  try {
-    await api('/api/me');
-    $('login').classList.add('hidden');
-    $('app').classList.remove('hidden');
-    await Promise.all([loadStats(), loadLeads(), loadAi()]);
-    timer = setInterval(() => loadStats().catch(() => {}), 30000);
-  } catch (e) {
-    $('loginErr').textContent = e.message;
-    await signOut(auth);
-  }
-});
+  setSession('');
+  $('who').textContent = '';
+  $('signout').classList.add('hidden');
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+  $('loginErr').textContent = msg || '';
+}
+
+async function start() {
+  if (!getSession()) return showLogin('');
+  const me = await api('/api/me');
+  $('who').textContent = me.user;
+  $('signout').classList.remove('hidden');
+  $('login').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  await loadStats();
+  await Promise.all([loadLeads(), loadAi()]);
+  clearInterval(timer);
+  timer = setInterval(() => loadStats().catch(() => {}), 30000);
+}
+
+start().catch(() => {});

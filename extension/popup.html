@@ -88,14 +88,22 @@
   </main>
 
   <main id="setup" class="hidden">
-    <h2>Setup</h2>
-    <label>Dashboard URL<input id="apiUrl" placeholder="https://your-project.web.app"></label>
-    <label>Extension token<input id="token" type="password" placeholder="paste the token"></label>
-    <div class="row">
-      <button id="save" class="btn">Save &amp; test</button>
-      <button id="back" class="btn ghost">Back</button>
-    </div>
-    <div id="msg" class="box muted">Paste the dashboard link and the token you were given.</div>
+    <form id="loginForm" style="display:grid;gap:10px">
+      <h2>Log in</h2>
+      <label>Username<input id="username" autocomplete="username" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+      <label>Name for this browser<input id="devName" placeholder="e.g. Mysha laptop" maxlength="40"></label>
+      <details>
+        <summary class="muted" style="cursor:pointer">Dashboard address</summary>
+        <input id="apiUrl" style="width:100%;margin-top:6px" placeholder="https://your-project.web.app">
+      </details>
+      <div class="row">
+        <button id="save" class="btn" type="submit">Log in</button>
+        <button id="back" class="btn ghost" type="button">Back</button>
+      </div>
+    </form>
+    <div id="msg" class="box muted">Use the same username and password as the dashboard. Each browser gets its own limit of 15 a day.</div>
+    <button id="logout" class="btn ghost hidden" type="button">Log this browser out</button>
   </main>
 
   <script src="popup.js"></script>
