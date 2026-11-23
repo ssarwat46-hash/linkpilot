@@ -112,7 +112,7 @@ async function tick() {
       await setStatus('Searching LinkedIn for new people');
       const { result } = await runInTab(task.url, scrapeSearch, []);
       const res = result || { error: 'no result from page' };
-      const out = await report('/api/ext/search-result', { key: task.key, results: res.results || [], error: res.error || null });
+      const out = await report('/api/ext/search-result', { key: task.key, results: res.results || [], error: res.error || null, debug: res.debug || null });
       await setStatus(res.error ? `Search: ${res.error}` : `Search: ${res.results.length} seen, ${out.added || 0} added to queue`);
     } else if (task.type === 'accept_check') {
       await setStatus('Checking who accepted');

@@ -296,6 +296,11 @@ app.post('/api/ext/claim', extAuth, async (req, res) => {
     const s = { ...DEFAULT_SETTINGS, ...(sSnap.data() || {}) };
     const st = stSnap.data() || {};
     const dv = dSnap.data() || {};
+    // One-off test search set by the admin: runs once even while paused (used to diagnose the search reader).
+    if (dv.testSearchUrl && String(req.body?.version || '') >= '2.3' && !((dv.lock?.until || 0) > now)) {
+      tx.set(dev.ref, { testSearchUrl: FieldValue.delete(), lock: { type: 'search', until: now + LOCK_MS } }, { merge: true });
+      return { task: { type: 'search', url: dv.testSearchUrl, key: 'test' } };
+    }
     if (s.paused) return { wait: 'paused' };
     if ((dv.pausedUntil || 0) > now) return { wait: `auto-paused until ${new Date(dv.pausedUntil).toISOString()}` };
     if (!inActiveWindow(now, s)) return { wait: 'outside active hours' };
@@ -513,7 +518,7 @@ app.post('/api/ext/accepted', extAuth, async (req, res) => {
 
 // People-search page results (feeds the shared queue).
 app.post('/api/ext/search-result', extAuth, async (req, res) => {
-  const { key, results, error } = req.body || {};
+  const { key, results, error, debug } = req.body || {};
   const dev = req.device;
   const s = await getSettings();
   const st = (await stateRef.get()).data() || {};
@@ -568,7 +573,7 @@ app.post('/api/ext/search-result', extAuth, async (req, res) => {
     await batch.commit();
   }
 
-  const shared = { searchLockUntil: 0, lastSearch: { at: Date.now(), found: raw.length, added, skipped, error: error || null, deviceId: dev.id } };
+  const shared = { searchLockUntil: 0, lastSearch: { at: Date.now(), found: raw.length, added, skipped, error: error || null, deviceId: dev.id, test: key === 'test', debug: debug ? JSON.stringify(debug).slice(0, 4000) : null } };
   if (!stale && Number.isInteger(cur.q)) {
     const next = nextCursor(cur, plan.queries.length, raw.length === 0);
     shared.searchCursor = next || { q: plan.queries.length, p: 1 };

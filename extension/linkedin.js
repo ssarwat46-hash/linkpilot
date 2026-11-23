@@ -129,7 +129,7 @@ export async function scrapeSearch() {
   if (!main) return { error: 'search page did not load' };
   const profileLinks = () => [...main.querySelectorAll('a[href*="/in/"]')];
   await waitFor(() => profileLinks().length > 0 || /no results found|try removing filters/i.test(main.innerText), 15000);
-  if (/no results found/i.test(main.innerText) && !profileLinks().length) return { results: [] };
+  if (/no results found/i.test(main.innerText) && !profileLinks().length) return { results: [], debug: { noResults: true, path: location.pathname + location.search.slice(0, 120), mainText: main.innerText.replace(/\s+/g, ' ').slice(0, 600) } };
 
   // Scroll through the page like a person reading it, so every card renders.
   for (let i = 0; i < 6; i++) { window.scrollBy({ top: rand(350, 600), behavior: 'smooth' }); await sleep(rand(700, 1400)); }
@@ -137,17 +137,39 @@ export async function scrapeSearch() {
   await sleep(rand(500, 1000));
 
   const junk = /^(connect|message|follow|view .+ profile|status is \w+|•|·|\d+(st|nd|rd|th)\+?|\d+(st|nd|rd|th) degree connection|current:|past:|summary:)$/i;
+  const slugOf = (a) => { try { return new URL(a.href, location.origin).pathname.match(/^\/in\/([^/]+)/)?.[1] || null; } catch { return null; } };
+  // The result card is the biggest ancestor that still holds links to only this one person.
+  // Class names change all the time, so this only relies on page structure.
+  const cardFor = (a, slug) => {
+    let card = null;
+    for (let el = a.parentElement; el && el !== main; el = el.parentElement) {
+      const slugs = new Set([...el.querySelectorAll('a[href*="/in/"]')].map(slugOf).filter(Boolean));
+      if (slugs.size > 1 || !slugs.has(slug)) break;
+      card = el;
+    }
+    return card;
+  };
   const out = new Map();
   for (const a of profileLinks()) {
-    const m = new URL(a.href, location.origin).pathname.match(/^\/in\/([^/]+)/);
-    if (!m || out.has(m[1])) continue;
-    const card = a.closest('li') || a.closest('[data-chameleon-result-urn]') || a.closest('div[class*="result"]');
+    const slug = slugOf(a);
+    if (!slug || out.has(slug)) continue;
+    const card = cardFor(a, slug);
     if (!card) continue;
     const lines = (card.innerText || '').split('\n').map((l) => l.trim()).filter((l) => l && !junk.test(l));
     const text = [...new Set(lines)].join(' | ').slice(0, 600);
-    if (text) out.set(m[1], { url: `https://www.linkedin.com/in/${m[1]}/`, text });
+    if (text.length > 15) out.set(slug, { url: `https://www.linkedin.com/in/${slug}/`, text });
   }
-  return { results: [...out.values()].slice(0, 15) };
+  const results = [...out.values()].slice(0, 15);
+  // What the page looked like, so a 0-result search can be diagnosed remotely. No names leave the page except the profile text already sent.
+  const links = profileLinks();
+  const chain = (el) => { const c = []; for (let x = el; x && x !== main && c.length < 12; x = x.parentElement) c.push(`${x.tagName.toLowerCase()}${x.className && typeof x.className === 'string' ? '.' + x.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}`); return c.join(' < '); };
+  const debug = {
+    path: location.pathname + location.search.slice(0, 120), title: document.title.slice(0, 120), visibility: document.visibilityState,
+    links: links.length, slugs: new Set(links.map(slugOf).filter(Boolean)).size, lis: main.querySelectorAll('li').length,
+    height: document.documentElement.scrollHeight, firstLinkChain: links[0] ? chain(links[0]) : null,
+    mainText: main.innerText.replace(/\s+/g, ' ').slice(0, 1500),
+  };
+  return { results, debug };
 }
 
 // Read the "recently added" connections list. Returns { hrefs } or { error }.
