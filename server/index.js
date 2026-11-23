@@ -4,7 +4,7 @@ import cors from 'cors';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import {
-  DEFAULT_SETTINGS, cleanSettings, inActiveWindow, lastNDateKeys, zonedParts,
+  DEFAULT_SETTINGS, cleanSettings, inActiveWindow, lastNShiftKeys, shiftDayKey,
   normalizeProfileUrl, randomGapMs, FINAL_OUTCOMES,
   searchUrl, nextCursor, hashText, isFirstDegree, cleanDm, planMessages, filterMessages, dmMessages,
 } from './lib.js';
@@ -170,10 +170,10 @@ async function ai(s, messages) {
 
 // Per-browser counters: daily/<deviceId>_<YYYY-MM-DD> { sent, dms, searches }
 async function counts(s, now, deviceId, tx) {
-  const keys = lastNDateKeys(now, s.timezone, 7);
+  const keys = lastNShiftKeys(now, s, 7);
   const refs = keys.map((k) => dailyRef(deviceId, k));
   const snaps = tx ? await tx.getAll(...refs) : await db.getAll(...refs);
-  const today = zonedParts(new Date(now), s.timezone).dateKey;
+  const today = shiftDayKey(now, s);
   let week = 0, t = {};
   snaps.forEach((sn, i) => {
     week += sn.data()?.sent || 0;
@@ -183,7 +183,7 @@ async function counts(s, now, deviceId, tx) {
 }
 
 async function bumpDaily(s, deviceId, field, now = Date.now()) {
-  await dailyRef(deviceId, zonedParts(new Date(now), s.timezone).dateKey).set({ [field]: inc(1) }, { merge: true });
+  await dailyRef(deviceId, shiftDayKey(now, s)).set({ [field]: inc(1) }, { merge: true });
 }
 
 async function releaseStale(now) {
@@ -399,7 +399,7 @@ app.post('/api/ext/result', extAuth, async (req, res) => {
   const dev = req.device;
   const s = await getSettings();
   const ref = leads.doc(String(id));
-  const todayKey = zonedParts(new Date(now), s.timezone).dateKey;
+  const todayKey = shiftDayKey(now, s);
   const note = detail ? String(detail).slice(0, 300) : null;
   const extra = {};
   if (typeof profile === 'string' && profile.trim()) extra.profile = profile.slice(0, 5000);

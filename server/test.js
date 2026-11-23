@@ -93,3 +93,19 @@ assert.equal(hashText('a'), hashText('a'));
 assert.notEqual(hashText('a'), hashText('b'));
 
 console.log('v2 tests passed');
+
+// ---------- overnight window counts as one day ----------
+import { shiftDayKey, lastNShiftKeys } from './lib.js';
+const nightS = { ...DEFAULT_SETTINGS, activeStart: '21:00', activeEnd: '05:00' }; // Asia/Dhaka = UTC+6
+// Mon 2026-11-23 21:30 BDT and Tue 02:00 BDT are the same "night"
+assert.equal(shiftDayKey(Date.parse('2026-11-23T15:30:00Z'), nightS), '2026-11-23');
+assert.equal(shiftDayKey(Date.parse('2026-11-23T20:00:00Z'), nightS), '2026-11-23');
+// the next evening starts a new night
+assert.equal(shiftDayKey(Date.parse('2026-11-24T15:00:00Z'), nightS), '2026-11-24');
+assert.equal(inActiveWindow(Date.parse('2026-11-23T20:00:00Z'), nightS), true);  // 02:00 BDT
+assert.equal(inActiveWindow(Date.parse('2026-11-23T23:30:00Z'), nightS), false); // 05:30 BDT
+assert.equal(inActiveWindow(Date.parse('2026-11-23T14:59:00Z'), nightS), false); // 20:59 BDT
+// daytime window: plain calendar day
+assert.equal(shiftDayKey(Date.parse('2026-11-23T05:00:00Z'), DEFAULT_SETTINGS), '2026-11-23');
+assert.equal(lastNShiftKeys(Date.parse('2026-11-23T20:00:00Z'), nightS, 7).length, 7);
+console.log('overnight tests passed');

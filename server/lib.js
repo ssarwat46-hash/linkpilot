@@ -55,6 +55,22 @@ export function lastNDateKeys(nowMs, timeZone, n) {
   return [...new Set(keys)];
 }
 
+// The "day" a moment belongs to for daily limits. When the window crosses midnight
+// (e.g. 21:00-05:00), the hours after midnight count toward the night that started the evening before,
+// so one night is one day: 15 per night, not 15 before midnight + 15 after.
+export function shiftDayKey(nowMs, s) {
+  const a = hhmmToMinutes(s.activeStart), b = hhmmToMinutes(s.activeEnd);
+  const { minutes, dateKey } = zonedParts(new Date(nowMs), s.timezone);
+  if (a != null && b != null && a > b && minutes < a) return zonedParts(new Date(nowMs - 86400000), s.timezone).dateKey;
+  return dateKey;
+}
+
+export function lastNShiftKeys(nowMs, s, n) {
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push(shiftDayKey(nowMs - i * 86400000, s));
+  return [...new Set(keys)];
+}
+
 export function hhmmToMinutes(s) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '').trim());
   if (!m) return null;
