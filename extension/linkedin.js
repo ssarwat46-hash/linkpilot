@@ -25,7 +25,8 @@ export async function connectOnProfile() {
   const done = (o) => ({ ...o, profile });
 
   const p = location.pathname;
-  if (/^\/(login|authwall|checkpoint|uas)/.test(p)) return { outcome: 'logged_out' };
+  if (/^\/checkpoint/.test(p)) return { outcome: 'security_check' };
+  if (/^\/(login|authwall|uas)/.test(p)) return { outcome: 'logged_out' };
   if (!p.startsWith('/in/')) return { outcome: 'error', detail: `not a profile page (${p})` };
 
   const main = await waitFor(() => document.querySelector('main'), 20000);
@@ -122,7 +123,8 @@ export async function scrapeSearch() {
     while (Date.now() < end) { const r = fn(); if (r) return r; await sleep(300); }
     return null;
   };
-  if (/^\/(login|authwall|checkpoint|uas)/.test(location.pathname)) return { error: 'logged_out' };
+  if (/^\/checkpoint/.test(location.pathname)) return { error: 'security_check' };
+  if (/^\/(login|authwall|uas)/.test(location.pathname)) return { error: 'logged_out' };
   const main = await waitFor(() => document.querySelector('main'), 20000);
   if (!main) return { error: 'search page did not load' };
   const profileLinks = () => [...main.querySelectorAll('a[href*="/in/"]')];
@@ -157,7 +159,8 @@ export async function scrapeConnections() {
     while (Date.now() < end) { const r = fn(); if (r) return r; await sleep(300); }
     return null;
   };
-  if (/^\/(login|authwall|checkpoint|uas)/.test(location.pathname)) return { error: 'logged_out' };
+  if (/^\/checkpoint/.test(location.pathname)) return { error: 'security_check' };
+  if (/^\/(login|authwall|uas)/.test(location.pathname)) return { error: 'logged_out' };
   const main = await waitFor(() => document.querySelector('main'), 20000);
   if (!main) return { error: 'connections page did not load' };
   await waitFor(() => main.querySelector('a[href*="/in/"]'), 15000);
@@ -181,7 +184,8 @@ export async function sendDm(message) {
   };
 
   const p = location.pathname;
-  if (/^\/(login|authwall|checkpoint|uas)/.test(p)) return { outcome: 'logged_out' };
+  if (/^\/checkpoint/.test(p)) return { outcome: 'security_check' };
+  if (/^\/(login|authwall|uas)/.test(p)) return { outcome: 'logged_out' };
   if (!p.startsWith('/in/')) return { outcome: 'error', detail: `not a profile page (${p})` };
   const main = await waitFor(() => document.querySelector('main'), 20000);
   if (!main) return { outcome: 'error', detail: 'profile did not load' };

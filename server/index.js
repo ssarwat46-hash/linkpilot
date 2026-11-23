@@ -35,6 +35,12 @@ const LOCK_MS = 10 * 60000;
 const ACCEPT_CHECK_EVERY = 3 * 3600000;
 const CONNECTIONS_URL = 'https://www.linkedin.com/mynetwork/invite-connect/connections/';
 const LOGGED_OUT = 'LinkedIn is logged out in this browser. Log back in. Retrying in 30 min.';
+// LinkedIn's "Security Verification" checkpoint means it suspects automation: back off hard, never try to get past it.
+const SECURITY = 'LinkedIn showed a security check in this browser. Paused for 24 hours. Complete the check by hand in that Chrome, then click Clear pause.';
+const blockPause = (kind, now = Date.now()) => (kind === 'security_check'
+  ? { pausedUntil: now + 24 * 3600000, lastError: SECURITY }
+  : { pausedUntil: now + 30 * 60000, lastError: LOGGED_OUT });
+const isBlock = (x) => x === 'logged_out' || x === 'security_check';
 const actionGap = () => Math.round((4 + Math.random() * 4) * 60000); // 4-8 min between non-invite actions
 const inc = (n) => FieldValue.increment(n);
 
@@ -428,10 +434,9 @@ app.post('/api/ext/result', extAuth, async (req, res) => {
       tx.update(ref, { status: 'queued', deviceId: null, claimedAt: null, detail: note, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
       dv.pausedUntil = now + 48 * 3600000;
       dv.lastError = 'LinkedIn weekly invite limit hit on this browser. Auto-paused for 48 hours.';
-    } else if (outcome === 'logged_out') {
+    } else if (isBlock(outcome)) {
       tx.update(ref, { status: 'queued', deviceId: null, claimedAt: null, attempts: inc(-1), history: FieldValue.arrayUnion(log) });
-      dv.pausedUntil = now + 30 * 60000;
-      dv.lastError = LOGGED_OUT;
+      Object.assign(dv, blockPause(outcome, now));
     } else {
       const failed = (lead.attempts || 0) >= 3;
       tx.update(ref, { status: failed ? 'failed' : 'queued', deviceId: failed ? dev.id : null, claimedAt: null, detail: note, history: FieldValue.arrayUnion(log) });
@@ -467,10 +472,9 @@ app.post('/api/ext/dm-result', extAuth, async (req, res) => {
   } else if (outcome === 'uncertain') {
     // Send was clicked but we couldn't confirm it. Never retry: a double text is worse than a missed one.
     await ref.update({ status: 'dm_failed', detail: note || 'not sure it sent, check the chat', claimedAt: null, history: FieldValue.arrayUnion(log) });
-  } else if (outcome === 'logged_out') {
+  } else if (isBlock(outcome)) {
     await ref.update({ status: 'accepted', claimedAt: null, dmAttempts: inc(-1), history: FieldValue.arrayUnion(log) });
-    dv.pausedUntil = now + 30 * 60000;
-    dv.lastError = LOGGED_OUT;
+    Object.assign(dv, blockPause(outcome, now));
   } else {
     const failed = (lead.dmAttempts || 0) >= 3;
     await ref.update({ status: failed ? 'dm_failed' : 'accepted', detail: note, claimedAt: null, history: FieldValue.arrayUnion(log) });
@@ -484,8 +488,8 @@ app.post('/api/ext/dm-result', extAuth, async (req, res) => {
 app.post('/api/ext/accepted', extAuth, async (req, res) => {
   const { hrefs, error } = req.body || {};
   const dev = req.device;
-  if (error === 'logged_out') {
-    await finishAction(dev, { pausedUntil: Date.now() + 30 * 60000, lastError: LOGGED_OUT, lastAcceptCheckAt: 0 });
+  if (isBlock(error)) {
+    await finishAction(dev, { ...blockPause(error), lastAcceptCheckAt: 0 });
     return res.json({ ok: true });
   }
   const slugs = new Set((Array.isArray(hrefs) ? hrefs : []).slice(0, 300).map((h) => normalizeProfileUrl(h)?.slug).filter(Boolean));
@@ -514,9 +518,9 @@ app.post('/api/ext/search-result', extAuth, async (req, res) => {
   const s = await getSettings();
   const st = (await stateRef.get()).data() || {};
   const plan = st.searchPlan;
-  if (error === 'logged_out') {
-    await stateRef.set({ searchLockUntil: 0 }, { merge: true });
-    await finishAction(dev, { pausedUntil: Date.now() + 30 * 60000, lastError: LOGGED_OUT });
+  if (isBlock(error)) {
+    await stateRef.set({ searchLockUntil: 0 }, { merge: true }); // cursor not advanced: this page is retried later
+    await finishAction(dev, blockPause(error));
     return res.json({ ok: true });
   }
   await bumpDaily(s, dev.id, 'searches');
