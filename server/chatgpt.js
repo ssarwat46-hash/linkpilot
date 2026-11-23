@@ -137,11 +137,14 @@ export function sseParser() {
   return out;
 }
 
+// This route only accepts input as a list of message items (a plain string is rejected: "Input must be a list").
+export const toInputItems = (text) => [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }];
+
 export async function respond({ accessToken, model, instructions, input }) {
   const r = await fetch(`${RESOURCE}/responses`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ model, instructions, input, store: false, stream: true }),
+    body: JSON.stringify({ model, instructions, input: Array.isArray(input) ? input : toInputItems(input), store: false, stream: true }),
     signal: AbortSignal.timeout(90000),
   });
   if (!r.ok) throw await apiError(r);

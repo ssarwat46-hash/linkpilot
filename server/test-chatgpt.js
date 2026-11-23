@@ -46,3 +46,8 @@ assert.deepEqual(extractJson('Sure! {"queries":["a"]} done'), { queries: ['a'] }
 assert.throws(() => extractJson('no json here'));
 
 console.log('chatgpt tests passed');
+
+// Responses input must be a list of message items on this route
+import { toInputItems } from './chatgpt.js';
+assert.deepEqual(toInputItems('hi'), [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }]);
+console.log('input format test passed');

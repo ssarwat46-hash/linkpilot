@@ -214,7 +214,7 @@ async function ensurePlan(s, st, force = false) {
     .map((q) => String(q).replace(/\s+/g, ' ').trim().slice(0, 80)).filter(Boolean).slice(0, 8);
   if (!queries.length) throw new Error('AI returned no search queries');
   const plan = { hash, queries, summary: String(out.summary || '').slice(0, 300), at: Date.now() };
-  await stateRef.set({ searchPlan: plan, searchCursor: { q: 0, p: 1 }, searchExhausted: false }, { merge: true });
+  await stateRef.set({ searchPlan: plan, searchCursor: { q: 0, p: 1 }, searchExhausted: false, lastError: null }, { merge: true });
   return plan;
 }
 
