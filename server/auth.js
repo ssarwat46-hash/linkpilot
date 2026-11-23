@@ -40,7 +40,7 @@ const DUMMY = hashPassword(crypto.randomBytes(8).toString('hex'));
 export function checkLogin(users, username, password) {
   const name = String(username || '').trim().toLowerCase();
   const stored = users.get(name);
-  const ok = verifyPassword(password, stored || DUMMY);
+  const ok = verifyPassword(String(password ?? '').trim(), stored || DUMMY); // ignore stray spaces from copy/paste
   return ok && stored ? name : null;
 }
 

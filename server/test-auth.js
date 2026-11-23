@@ -12,6 +12,7 @@ const users = parseUsers(`Alice:${h}; bob:notahash ;:x`);
 assert.equal(users.size, 1);
 assert.equal(checkLogin(users, ' ALICE ', 'correct horse battery'), 'alice'); // usernames are case-insensitive
 assert.equal(checkLogin(users, 'alice', 'nope'), null);
+assert.equal(checkLogin(users, 'alice', '  correct horse battery  '), 'alice'); // pasted with spaces
 assert.equal(checkLogin(users, 'nobody', 'correct horse battery'), null);
 
 const secret = 'x'.repeat(40);

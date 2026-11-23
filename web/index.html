@@ -60,6 +60,7 @@
   <h2>Sign in</h2>
   <label>Username<input id="username" name="username" autocomplete="username" required></label>
   <label style="margin-top:10px">Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+  <label class="check" style="margin-top:8px"><input type="checkbox" id="showPw" onchange="document.getElementById('password').type = this.checked ? 'text' : 'password'"> Show password</label>
   <button id="signin" type="submit" style="margin-top:14px;width:100%">Sign in</button>
   <p id="loginErr" class="muted"></p>
 </form>
